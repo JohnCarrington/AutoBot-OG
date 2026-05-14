@@ -757,6 +757,140 @@ not survive overnight.
 | BE at              | +1R                  | +1R                    | +1R                    |
 | Hold overnight     | No                   | Yes (M–Th, in profit)  | No                     |
 
+### 5.5 Phase 5 module structure
+
+The strategy layer ships as `src/strategies/` with one detector per
+regime plus a dispatcher. Each detector is a stateless function:
+
+```python
+def detect_<name>(
+    df_m5: pd.DataFrame,        # enriched M5 candles
+    df_h1: pd.DataFrame,        # enriched H1 candles
+    regime_state: RegimeState,
+    pair: str,
+    current_time: datetime,
+) -> Optional[Signal]: ...
+```
+
+```
+src/strategies/
+├── signal.py            # Signal dataclass + StrategyName Literal alias
+├── constants.py         # env-overridable strategy tunables
+├── sessions.py          # london/ny/overlap predicates (DST-aware)
+├── bb_reclaim.py        # detect_bb_reclaim          (§5.1)
+├── ema_continuation.py  # detect_ema_continuation    (§5.2)
+├── liquidity_sweep.py   # detect_liquidity_sweep     (§5.3)
+└── dispatcher.py        # detect_all_setups (regime→strategy routing)
+```
+
+`detect_all_setups` is the integration point: it consults
+`regime_state["current_regime"]` and routes to the single eligible
+detector. `TRANSITION` short-circuits to `[]`.
+
+#### Signal contract
+
+`Signal` is a frozen dataclass that carries **suggested** price levels
+plus enough metadata for downstream risk and execution layers to
+decide whether to act:
+
+- `direction: Direction`, `regime: RegimeLabel` — enums from
+  `regime.labels`, not raw strings. Type-safe with the rest of the
+  codebase.
+- `strategy_name: StrategyName` — `Literal["bb_reclaim",
+  "ema_continuation", "liquidity_sweep"]`.
+- `suggested_entry_price`, `suggested_sl_price`, `suggested_tp_price`
+  (`None` for trend/sweep — managed by structure trail in Phase 6).
+- `confidence_score: float ∈ [0, 1]` — binary HIGH/LOW split per
+  strategy in v1 (see `strategies/constants.py`).
+- `source_candle_ts: datetime` — the confirmation candle's timestamp.
+- `invalid_after_candle_ts: datetime` — `source_candle_ts +
+  M5_BAR_MINUTES` minutes. The risk layer rejects stale signals.
+- `debug: Mapping[str, Any]` — free-form diagnostic payload; shape is
+  intentionally **not** part of the contract.
+
+#### Spec-ambiguity resolutions
+
+The locked Phase 5 decisions, captured here so future revisions can
+re-litigate them deliberately:
+
+- **Stateless 3-bar inspection** — each call walks `df_m5.iloc[-3:]`
+  (pierce/pullback/sweep, rejection/reclaim, confirmation). No
+  module-level mutable state, no class instances tracking history.
+  Strategies are pure functions of their inputs.
+- **Single-strategy-per-regime routing** — `RANGE → bb_reclaim`,
+  `TREND → ema_continuation`, `VOLATILE → liquidity_sweep`,
+  `TRANSITION → []`. Multi-strategy emission is reserved for v2.
+- **Pip conversion** — `config/pair_config.py::pip_to_price(pair, pips)`
+  and `price_to_pips(pair, price_diff)` are the canonical translators.
+  Strategy tunables are stored in pips (matching the v1 spec); ATR
+  outputs are in price units; the helpers bridge between them.
+- **MIN_SL_PIPS floor** — `max(MIN_SL_PIPS[pair], multiplier × ATR_M5_pips)`.
+  GBPUSD v1 floor is 15 pips (§6.1). The §5 spec text mentions a
+  generic 12-pip illustration; the actual minimum is the pair-specific
+  floor.
+- **EMA pullback close tolerance** —
+  `STRATEGY_EMA_PULLBACK_CLOSE_TOLERANCE_PIPS = 5.0`. The pullback
+  bar must wick-penetrate EMA50 (`pullback.low <= ema_50` for
+  bullish), and its close may sit up to 5 pips on the wrong side
+  before disqualifying. Matches the spec wording "touches the EMA50
+  or closes one bar slightly past it on the wrong side".
+- **Structure check (EMA Continuation only)** — bullish TREND
+  requires `recent_pattern ∈ {HH, HL}`; bearish requires
+  `{LH, LL}`. The structure module already applies the 2-bar fractal
+  lag, so the strategy trusts the label directly.
+- **Sweep swing source (Liquidity Sweep)** —
+  `get_structure_state(df_m5).last_swing_low` / `_high`. The wick
+  must pierce that level; the reclaim bar must close back on the
+  correct side; the sweep loses freshness after
+  `STRATEGY_SWEEP_SWING_MAX_AGE_BARS = 24` M5 bars (~2 hours).
+- **Sweep magnitude → confidence** — high-confidence requires the
+  wick to extend > `STRATEGY_LIQ_SWEEP_STRONG_ATR_FRACTION = 0.5` ×
+  ATR_M5 in price units beyond the swept level.
+- **Session gating (Liquidity Sweep only)** — London (`Europe/London`
+  07:00–15:00) OR NY (`America/New_York` 08:00–17:00). Asia rejected.
+  Implemented via :mod:`zoneinfo` so DST transitions are automatic.
+- **MACD-H1 alignment for confidence bump** — `sign(macd_hist_12_26_9)`
+  must match the signal direction (`> 0 ↔ BULLISH`, `< 0 ↔ BEARISH`).
+  Zero histogram counts as not-aligned. Each strategy has its own
+  HIGH/LOW pair of constants.
+- **`invalid_after_candle_ts`** — `source_candle_ts +
+  M5_BAR_MINUTES` (default 5 minutes). The signal is valid until the
+  next M5 close; the risk layer rejects anything stale.
+- **No price-magnitude pip inference** — `PIP_SIZE` is an explicit
+  per-pair dict in `pair_config.py`. New pairs must be added there
+  rather than detected from quote magnitude.
+- **Liquidity-sweep session gate uses the confirmation bar's
+  timestamp** — not the caller-supplied ``current_time``. In live
+  operation they are effectively equal; in backtests / replays
+  ``current_time`` is the wall-clock (often ``datetime.now()``) while
+  the bar timestamps are the historical period being replayed.
+  Anchoring the gate to the bar makes session filtering reproducible
+  across both modes (H1, review 2026-05-14).
+- **EMA Continuation pullback bar count** — v1 inspects only the
+  single ``df_m5.iloc[-3]`` bar as the pullback; the spec's "2–3
+  M5 bars" wording is satisfied via the structure check
+  (``recent_pattern in {HH, HL}`` for bullish) which requires
+  consistent retrace structure over the 10-bar lookback. A 3+ bar
+  retrace where the EMA touch happened earlier than ``iloc[-3]`` is
+  intentionally skipped — v2 may walk back N bars (M1, review
+  2026-05-14).
+- **BB Reclaim TP midline source** — anchored to ``pierce.bb_mid_20_2``,
+  not ``confirmation.bb_mid_20_2``. The midline drifts bar-to-bar;
+  using the pierce bar's midline keeps R-multiples stable relative
+  to the rejection thesis (M2, review 2026-05-14).
+- **Boundary inclusivity** — strict on bars that drive the
+  directional thesis (pierce ``<``, confirmation ``>``); inclusive on
+  bars that merely say "we are no longer outside the band"
+  (rejection ``<= close <=``). Mirror in SHORT setups (M5, review
+  2026-05-14).
+
+#### Env-var overrides
+
+All tunables in `strategies/constants.py` read from
+`STRATEGY_<NAME>` environment variables at import time. Defaults
+match this section's locked spec. Pattern mirrors
+`risk/constants.py` and `config/pair_config.py`.
+
 ---
 
 ## Section 6 — Risk Layer & Trade Management
