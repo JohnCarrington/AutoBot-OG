@@ -2,3 +2,6 @@
 pandas==2.3.3
 numpy==2.2.6
 pytest==8.4.2
+
+# Added by risk/news_calendar (Finnhub HTTP fetch).
+requests==2.32.3
