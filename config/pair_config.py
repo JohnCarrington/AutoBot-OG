@@ -94,11 +94,65 @@ def pair_from_epic(epic: str) -> str:
     return parts[2] if len(parts) >= 3 else epic.upper()
 
 
+# ---------------------------------------------------------------------------
+# Pip ↔ price conversion (Phase 5).
+#
+# A "pip" is the smallest *quoted* price increment for a pair (one tenth of
+# the table-stakes quote unit for JPY pairs, four decimal places elsewhere).
+# We expose this as a per-pair constant rather than deriving it from the
+# raw quote because broker conventions diverge for exotic pairs — making
+# the table the source of truth means the strategy layer never has to
+# inspect price magnitudes to decide.
+# ---------------------------------------------------------------------------
+PIP_SIZE: Final[dict[str, float]] = {
+    "GBPUSD": 0.0001,
+    "EURUSD": 0.0001,
+    "USDJPY": 0.01,
+    "USDCAD": 0.0001,
+    "GBPJPY": 0.01,
+}
+_DEFAULT_PIP_SIZE: Final[float] = 0.0001
+
+
+def pip_size_for(pair: str) -> float:
+    """Return the price increment of one pip for ``pair``.
+
+    Returns ``0.0001`` for major non-JPY pairs and ``0.01`` for JPY
+    pairs. Unknown pairs default to ``0.0001`` (the four-decimal
+    convention) — explicit lookup is preferred over magnitude-based
+    detection so a new pair surfaces here rather than in price math.
+    """
+    return PIP_SIZE.get(pair.upper(), _DEFAULT_PIP_SIZE)
+
+
+def pip_to_price(pair: str, pips: float) -> float:
+    """Convert a pip count to a price-units delta for ``pair``.
+
+    Used by the strategy and risk layers when translating tunables
+    expressed in pips (``MIN_SL_PIPS``, ATR multipliers in pip-space)
+    into price-units offsets applied to candle prices.
+    """
+    return pips * pip_size_for(pair)
+
+
+def price_to_pips(pair: str, price_diff: float) -> float:
+    """Convert a price-units delta to pips for ``pair``.
+
+    Inverse of :py:func:`pip_to_price`. Sign-preserving: a negative
+    ``price_diff`` returns a negative pip count.
+    """
+    return price_diff / pip_size_for(pair)
+
+
 __all__ = [
     "PAIRS",
     "POINTS_PER_PIP",
     "DEFAULT_PPP",
     "MIN_SL_PIPS",
+    "PIP_SIZE",
     "get_ppp",
     "pair_from_epic",
+    "pip_size_for",
+    "pip_to_price",
+    "price_to_pips",
 ]
