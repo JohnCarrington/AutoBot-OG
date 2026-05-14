@@ -337,6 +337,35 @@ def test_force_close_passes_through_engine_state(tmp_path: Path) -> None:
     assert pids == ["range"]
 
 
+def test_force_close_passes_engine_pending_state_through(
+    tmp_path: Path,
+) -> None:
+    """H3 wiring (review 2026-05-14): the guard must forward the
+    engine's pending state so EOD can detect in-flight transitions.
+    Set up: committed TREND/BULLISH + pending RANGE. The aligned
+    TREND position would survive under the old API but must now
+    force-close because the engine is mid-transition.
+    """
+    eng = RegimeEngine()
+    eng.current_regime = RegimeLabel.TREND
+    eng.current_direction = Direction.BULLISH
+    eng.pending_regime = RegimeLabel.RANGE
+    eng.pending_direction = None
+    guard = RiskGuard(engine=eng, state_path=tmp_path / "cb.json")
+    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
+    orders = guard.positions_to_force_close(
+        positions=[
+            _pos(pid="trend_pending_range",
+                 regime=RegimeLabel.TREND,
+                 pnl_r=2.0),
+        ],
+        now_utc=now,
+    )
+    assert len(orders) == 1
+    assert orders[0].position_id == "trend_pending_range"
+    assert "trend_pending_transition" in orders[0].reason
+
+
 def test_force_close_returns_empty_before_close(tmp_path: Path) -> None:
     eng = RegimeEngine()
     guard = RiskGuard(engine=eng, state_path=tmp_path / "cb.json")

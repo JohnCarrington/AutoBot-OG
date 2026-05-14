@@ -972,12 +972,24 @@ re-litigate them deliberately:
   (`current_regime` changes during the bar). Cancelled pendings do not
   count.
 - **What counts as an "M5 reset"** — `m5_confirmation_count` transitions
-  from `>0` to `0` (a disagreeing M5 closed against an in-flight
-  pending).
+  from `>0` to `0` **without a commit** (a disagreeing M5 closed
+  against an in-flight pending). A successful third-M5 promotion also
+  drops the counter to 0, but is recorded as `committed=True,
+  was_m5_reset=False`. The risk layer's instability counter must count
+  legitimate commits and actual resets in separate buckets (review
+  C1, 2026-05-14).
 - **Pause duration (§6.9.3)** — `max(1h, time-until-next-regime-live-H1-close)`.
   Implemented as a primary 1-hour cooldown with an extension check on
   every subsequent `allow_entry` that consults
-  `RegimeEngine.regime_live_at_last_h1_close()`.
+  `RegimeEngine.regime_live_at_last_h1_close()`. The helper returns
+  True only when (a) `is_live()` was True at the last H1 close *and*
+  (b) the committed regime was non-VOLATILE — VOLATILE is "live" for
+  sweep strategies but is by definition the unstable state, so it
+  must not clear the instability cooldown (review H1, 2026-05-14).
+  The snapshot is updated only inside `process_h1_close` (not on
+  M5-driven commits), matching the spec's "full H1 close" wording
+  (review H2, 2026-05-14) — accepted as an up-to-one-H1-window
+  opportunity cost.
 - **Pause scope** — per-pair. v1 single-pair collapses this to global,
   but the state model carries `regime_instability_pair`.
 - **EOD time (§6.5)** — DST-aware. NY close at 17:00 in
@@ -988,7 +1000,21 @@ re-litigate them deliberately:
   prohibition on stop modifications lives in Phase 5's execution layer.
 - **Pre-EOD suppression** — 30 min before NY close, suppress new
   entries for RANGE/VOLATILE always; suppress TREND only on Fridays
-  (TREND can hold overnight Mon-Thu).
+  (TREND can hold overnight Mon-Thu). A TREND entered inside the
+  Mon-Thu buffer is allowed by the gate but has no realistic path to
+  +1R before NY close, so `apply_eod_force_close` will close it with
+  a `trend_below_overnight_R` reason that includes the inside-buffer
+  diagnostic note (review H4, 2026-05-14).
+- **TREND overnight hold gates** — a TREND survives NY close iff
+  (Mon-Thu) AND (`current_pnl_r >= 1.0`) AND (engine's committed
+  regime still TREND, aligned direction) AND (engine has no
+  contradicting pending transition staged). The pending check
+  (review H3, 2026-05-14) accepts `pending_regime in {None, TREND}`
+  where pending TREND must match the position's entry direction;
+  RANGE / VOLATILE / opposite-direction-TREND pendings all
+  force-close. Without this, a TREND that committed cleanly at H1
+  but is *already* losing the regime via an in-flight RANGE pending
+  would ride a no-longer-aligned bias overnight.
 - **SL sizing** — out of scope for Phase 4. The execution layer
   (Phase 5) computes `SL = max(MIN_SL_PIPS, multiplier × ATR_M5)` per
   §6.1 and feeds the resulting stop into broker placement.

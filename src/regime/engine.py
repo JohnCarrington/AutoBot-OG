@@ -94,8 +94,12 @@ class RegimeEmission:
     was_m5_reset : bool
         Only meaningful for ``kind == "M5"``. True iff the M5
         confirmation counter went from ``>0`` to ``0`` on this close
-        (i.e. an agreeing-streak was broken by a disagreeing M5). The
-        risk layer counts these toward its instability trigger.
+        *and* the regime did NOT commit (i.e. an agreeing-streak was
+        broken by a disagreeing M5, not promoted to current). The
+        third-M5 promotion case also drops the counter to 0 but is
+        recorded as ``committed=True, was_m5_reset=False`` — the risk
+        layer's instability counter must count legitimate commits and
+        actual resets separately. See review C1 (2026-05-14).
     """
 
     timestamp: Any
@@ -142,6 +146,12 @@ class RegimeEngine:
         # Snapshot of ``is_live()`` captured at the most recent H1 close,
         # used by the risk layer's regime-instability cooldown extension.
         self._last_h1_is_live: bool = False
+        # Snapshot of ``current_regime`` at the most recent H1 close
+        # (H1 fix). The instability cooldown extension wants "regime
+        # held live AND non-VOLATILE for a full H1 close" — VOLATILE is
+        # by definition the *unstable* state, so the extension must not
+        # clear merely because VOLATILE is committed.
+        self._last_h1_regime: RegimeLabel = RegimeLabel.TRANSITION
 
     # --- Public query API ----------------------------------------------------
 
@@ -214,15 +224,39 @@ class RegimeEngine:
         return out
 
     def regime_live_at_last_h1_close(self) -> bool:
-        """Return ``is_live()`` captured at the most recent H1 close.
+        """Return True iff the last H1 close left a stable, live regime.
 
         Used by the risk layer's regime-instability cooldown extension:
-        after the primary 1-hour cooldown elapses, entries remain blocked
-        until at least one H1 close has produced ``is_live=True``. The
-        property is set to ``False`` on construction; it becomes
+        after the primary 1-hour cooldown elapses, entries remain
+        blocked until at least one H1 close has produced ``is_live=True``
+        AND the committed regime is non-VOLATILE.
+
+        The dual condition matters because:
+
+        - **H1 fix (review 2026-05-14):** VOLATILE is "live" under
+          :py:meth:`is_live` (sweep strategies can act on it) — but the
+          instability cooldown exists precisely because the regime
+          was unstable, and VOLATILE is the textbook unstable state.
+          Allowing VOLATILE to clear the extension means the cooldown
+          ends mid-volatility, exactly what the breaker is supposed to
+          prevent. The helper therefore requires
+          ``_last_h1_regime in (TREND, RANGE)``.
+        - **H2 (intentional, docs-only):** the snapshot is taken only
+          inside :py:meth:`process_h1_close`. An M5-driven commit
+          between two H1 closes is **not** reflected here — the spec
+          (§6.9.3) reads "regime held live for a full H1 close", so
+          waiting for the next H1 print is correct. The
+          ``test_regime_live_at_last_h1_close_not_updated_by_m5_only``
+          test pins this; an interim opportunity cost of up to one H1
+          window is accepted by design.
+
+        The snapshot is set to ``False`` on construction; it becomes
         meaningful after the first call to :py:meth:`process_h1_close`.
         """
-        return self._last_h1_is_live
+        return self._last_h1_is_live and self._last_h1_regime in (
+            RegimeLabel.TREND,
+            RegimeLabel.RANGE,
+        )
 
     # --- H1 event ------------------------------------------------------------
 
@@ -257,6 +291,7 @@ class RegimeEngine:
             )
         )
         self._last_h1_is_live = self.is_live()
+        self._last_h1_regime = self.current_regime
 
     def _process_h1_close_inner(
         self,
@@ -438,8 +473,18 @@ class RegimeEngine:
         pre_regime = self.current_regime
         timestamp = m5_row.name
         self._process_m5_close_inner(m5_row)
-        was_m5_reset = pre_count > 0 and self.m5_confirmation_count == 0
         committed = self.current_regime != pre_regime
+        # C1 fix: ``was_m5_reset`` means "a disagreeing M5 closed against
+        # an in-flight pending" — counter dropped from >0 to 0 *without*
+        # promoting to current. A successful commit also drops the
+        # counter to 0 (via _commit_pending) but is not a reset; the risk
+        # layer's instability counter would otherwise sum legitimate
+        # commits into the M5-reset bucket and falsely trip the breaker.
+        was_m5_reset = (
+            pre_count > 0
+            and self.m5_confirmation_count == 0
+            and not committed
+        )
         self._emission_log.append(
             RegimeEmission(
                 timestamp=timestamp,

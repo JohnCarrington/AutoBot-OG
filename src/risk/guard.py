@@ -184,15 +184,20 @@ class RiskGuard:
     ) -> list[ForceCloseOrder]:
         """Return the list of positions that must be flat overnight.
 
-        Reads ``current_regime`` / ``current_direction`` directly from
-        the engine — these are the post-most-recent-H1-close values
-        (the spec's "regime still TREND, same direction" check).
+        Reads ``current_regime`` / ``current_direction`` and
+        ``pending_regime`` / ``pending_direction`` directly from the
+        engine. The pending state is forwarded so the EOD rule can
+        force-close TREND positions when a transition to RANGE /
+        VOLATILE / opposite-direction TREND is already in flight
+        (H3 from the 2026-05-14 review).
         """
         return apply_eod_force_close(
             positions=positions,
             now_utc=now_utc,
             current_regime=self.engine.current_regime,
             current_direction=self.engine.current_direction,
+            pending_regime=self.engine.pending_regime,
+            pending_direction=self.engine.pending_direction,
         )
 
     # --- Trade-outcome bookkeeping ------------------------------------------

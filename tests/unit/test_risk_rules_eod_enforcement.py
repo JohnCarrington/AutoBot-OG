@@ -29,6 +29,7 @@ def _pos(
     regime: RegimeLabel = RegimeLabel.TREND,
     direction: Direction = Direction.BULLISH,
     pnl_r: float = 0.0,
+    entry_time_utc: datetime | None = None,
 ) -> OpenPosition:
     return OpenPosition(
         position_id=pid,
@@ -37,7 +38,11 @@ def _pos(
         regime_at_entry=regime,
         entry_price=1.30,
         current_price=1.31,
-        entry_time_utc=datetime(2025, 5, 14, 12, 0, tzinfo=timezone.utc),
+        entry_time_utc=(
+            entry_time_utc
+            if entry_time_utc is not None
+            else datetime(2025, 5, 14, 12, 0, tzinfo=timezone.utc)
+        ),
         current_pnl_r=pnl_r,
     )
 
@@ -235,6 +240,164 @@ def test_force_close_dst_winter() -> None:
         current_direction=None,
     )
     assert len(orders) == 1
+
+
+# --- H3: pending regime gates TREND overnight ------------------------------
+
+
+def test_trend_closed_when_pending_regime_is_range() -> None:
+    """H3 (review 2026-05-14): a profitable, aligned TREND with a
+    pending RANGE staged must force-close. The engine is in the middle
+    of transitioning away — riding the position overnight is not what
+    the spec "regime still TREND" check intended.
+    """
+    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
+    orders = apply_eod_force_close(
+        positions=[_pos(regime=RegimeLabel.TREND, pnl_r=2.0)],
+        now_utc=now,
+        current_regime=RegimeLabel.TREND,
+        current_direction=Direction.BULLISH,
+        pending_regime=RegimeLabel.RANGE,
+        pending_direction=None,
+    )
+    assert len(orders) == 1
+    assert "trend_pending_transition" in orders[0].reason
+    assert "pending=RANGE" in orders[0].reason
+
+
+def test_trend_closed_when_pending_regime_is_volatile() -> None:
+    """H3: pending VOLATILE → force-close even if committed TREND is
+    still aligned. VOLATILE is the textbook unstable state."""
+    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
+    orders = apply_eod_force_close(
+        positions=[_pos(regime=RegimeLabel.TREND, pnl_r=2.0)],
+        now_utc=now,
+        current_regime=RegimeLabel.TREND,
+        current_direction=Direction.BULLISH,
+        pending_regime=RegimeLabel.VOLATILE,
+        pending_direction=None,
+    )
+    assert len(orders) == 1
+    assert "trend_pending_transition" in orders[0].reason
+
+
+def test_trend_closed_when_pending_opposite_direction_trend() -> None:
+    """H3: pending TREND in the opposite direction also force-closes."""
+    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
+    orders = apply_eod_force_close(
+        positions=[
+            _pos(
+                regime=RegimeLabel.TREND,
+                pnl_r=2.0,
+                direction=Direction.BULLISH,
+            )
+        ],
+        now_utc=now,
+        current_regime=RegimeLabel.TREND,
+        current_direction=Direction.BULLISH,
+        pending_regime=RegimeLabel.TREND,
+        pending_direction=Direction.BEARISH,
+    )
+    assert len(orders) == 1
+    assert "trend_pending_transition" in orders[0].reason
+
+
+def test_trend_survives_when_pending_is_aligned_trend() -> None:
+    """H3: pending TREND in the same direction is a benign
+    reconfirmation — the position survives overnight as if no pending
+    were staged.
+    """
+    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
+    orders = apply_eod_force_close(
+        positions=[
+            _pos(
+                regime=RegimeLabel.TREND,
+                pnl_r=2.0,
+                direction=Direction.BULLISH,
+            )
+        ],
+        now_utc=now,
+        current_regime=RegimeLabel.TREND,
+        current_direction=Direction.BULLISH,
+        pending_regime=RegimeLabel.TREND,
+        pending_direction=Direction.BULLISH,
+    )
+    assert orders == []
+
+
+def test_trend_survives_when_pending_is_none() -> None:
+    """H3: explicit pending=None (engine settled) → survives."""
+    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
+    orders = apply_eod_force_close(
+        positions=[_pos(regime=RegimeLabel.TREND, pnl_r=2.0)],
+        now_utc=now,
+        current_regime=RegimeLabel.TREND,
+        current_direction=Direction.BULLISH,
+        pending_regime=None,
+        pending_direction=None,
+    )
+    assert orders == []
+
+
+# --- H4: reason string for TREND entered inside the buffer -----------------
+
+
+def test_trend_below_R_inside_buffer_flags_wasted_entry_in_reason() -> None:
+    """H4 (review 2026-05-14): a TREND opened inside the pre-EOD buffer
+    that hasn't reached +1R is a known footgun (no time to make the
+    move). Force-close fires anyway; the reason string surfaces the
+    inside-buffer entry so post-mortems can spot it without rerunning
+    the strategy log.
+    """
+    # NY close at 17:00 EDT = 21:00 UTC; entry 15 min earlier.
+    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
+    entry = datetime(2025, 5, 14, 20, 45, tzinfo=timezone.utc)
+    orders = apply_eod_force_close(
+        positions=[
+            _pos(
+                regime=RegimeLabel.TREND,
+                pnl_r=0.3,
+                entry_time_utc=entry,
+            )
+        ],
+        now_utc=now,
+        current_regime=RegimeLabel.TREND,
+        current_direction=Direction.BULLISH,
+    )
+    assert len(orders) == 1
+    reason = orders[0].reason
+    assert "trend_below_overnight_R" in reason
+    # The buffer note appears exactly when the entry was inside the buffer.
+    assert "inside" in reason
+    assert "buffer" in reason
+    assert "no path" in reason
+
+
+def test_trend_below_R_outside_buffer_omits_wasted_entry_note() -> None:
+    """H4 negative case: an entry made hours before close, that still
+    sits below +1R at NY close, force-closes without the buffer note
+    — the buffer-note diagnostic should only fire when the entry was
+    inside the buffer window.
+    """
+    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
+    entry = datetime(2025, 5, 14, 12, 0, tzinfo=timezone.utc)  # 9h earlier
+    orders = apply_eod_force_close(
+        positions=[
+            _pos(
+                regime=RegimeLabel.TREND,
+                pnl_r=0.5,
+                entry_time_utc=entry,
+            )
+        ],
+        now_utc=now,
+        current_regime=RegimeLabel.TREND,
+        current_direction=Direction.BULLISH,
+    )
+    assert len(orders) == 1
+    reason = orders[0].reason
+    assert "trend_below_overnight_R" in reason
+    assert "inside" not in reason
+    assert "no path" not in reason
 
 
 def test_mixed_position_basket() -> None:

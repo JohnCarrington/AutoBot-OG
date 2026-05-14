@@ -99,6 +99,51 @@ def test_emission_committed_flag_only_true_when_regime_changes() -> None:
             assert eng._emission_log[-1].regime == RegimeLabel.TREND
 
 
+def test_emission_was_m5_reset_NOT_on_promotion_to_current() -> None:
+    """C1 regression (review 2026-05-14): a successful 3-M5 commit also
+    drops ``m5_confirmation_count`` from 2 → 0 (via ``_commit_pending``).
+    That drop is **not** a "reset" — the spec defines reset as a
+    disagreeing M5 closing against an in-flight pending. The risk
+    layer's instability counter must not sum legitimate commits into
+    the M5-reset bucket; otherwise a series of successful regime
+    transitions would trip the breaker for no reason.
+    """
+    eng = RegimeEngine()
+    # H1 stages pending TREND/BULLISH; current still TRANSITION.
+    eng.process_h1_close(
+        _h1(
+            structural_pattern="HH+HL",
+            slope=0.45,
+            bb_width=2.0,
+            name=datetime(2025, 1, 1, 0, 0, tzinfo=timezone.utc),
+        )
+    )
+    # Three agreeing M5 closes — third one promotes pending → current.
+    timestamps = [
+        datetime(2025, 1, 1, 0, 5, tzinfo=timezone.utc),
+        datetime(2025, 1, 1, 0, 10, tzinfo=timezone.utc),
+        datetime(2025, 1, 1, 0, 15, tzinfo=timezone.utc),
+    ]
+    for i, ts in enumerate(timestamps):
+        eng.process_m5_close(
+            _m5_trend(slope=0.10, ema=100.0, close=101.0, name=ts)
+        )
+        emission = eng._emission_log[-1]
+        # Every M5 here is an *agreement*, never a reset.
+        assert emission.was_m5_reset is False, (
+            f"M5 #{i + 1} should not be marked as a reset; counter went "
+            f"{i} → {eng.m5_confirmation_count} via "
+            f"{'commit' if i == 2 else 'agreement'}"
+        )
+    # The third emission is the commit.
+    final = eng._emission_log[-1]
+    assert final.committed is True
+    assert final.regime == RegimeLabel.TREND
+    # And the counter is back to 0 — but again, that's a commit-drop,
+    # not a reset.
+    assert eng.m5_confirmation_count == 0
+
+
 def test_emission_was_m5_reset_only_on_counter_drop_from_nonzero() -> None:
     eng = RegimeEngine()
     eng.process_h1_close(
@@ -227,7 +272,16 @@ def test_regime_live_at_last_h1_close_false_on_fresh_engine() -> None:
     assert eng.regime_live_at_last_h1_close() is False
 
 
-def test_regime_live_at_last_h1_close_after_volatile_commit() -> None:
+def test_regime_live_at_last_h1_close_VOLATILE_returns_false() -> None:
+    """H1 regression (review 2026-05-14): VOLATILE is "live" under
+    :py:meth:`is_live` (sweep strategies act on it), but it is by
+    definition the *unstable* state. The regime-instability cooldown
+    extension uses ``regime_live_at_last_h1_close`` to decide when to
+    clear the pause — allowing VOLATILE to clear it would let the bot
+    resume trading mid-volatility, exactly the failure mode the
+    breaker exists to prevent. The helper must therefore require the
+    committed regime to be one of {TREND, RANGE}.
+    """
     eng = RegimeEngine()
     # Direct VOLATILE entry commits immediately → is_live becomes True.
     eng.process_h1_close(
@@ -236,6 +290,46 @@ def test_regime_live_at_last_h1_close_after_volatile_commit() -> None:
             slope=0.45,
             bb_width=2.0,
             name=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    # is_live() is True (sweep strategies still execute), but the
+    # extension-check helper returns False — VOLATILE is excluded.
+    assert eng.is_live() is True
+    assert eng.current_regime == RegimeLabel.VOLATILE
+    assert eng.regime_live_at_last_h1_close() is False
+
+
+def test_regime_live_at_last_h1_close_true_after_committed_trend_h1() -> None:
+    """After M5 commits TREND, the *next* H1 close picks up
+    ``current_regime == TREND`` and ``is_live() == True``, so the
+    helper returns True. Pins the H1 fix from a different angle.
+    """
+    eng = RegimeEngine()
+    eng.process_h1_close(
+        _h1(
+            structural_pattern="HH+HL",
+            slope=0.45,
+            bb_width=2.0,
+            name=datetime(2025, 1, 1, tzinfo=timezone.utc),
+        )
+    )
+    for i in range(3):
+        eng.process_m5_close(
+            _m5_trend(
+                slope=0.10,
+                ema=100.0,
+                close=101.0,
+                name=datetime(2025, 1, 1, 0, 5 * (i + 1), tzinfo=timezone.utc),
+            )
+        )
+    assert eng.current_regime == RegimeLabel.TREND
+    # Next H1 close — same TREND, matches_current.
+    eng.process_h1_close(
+        _h1(
+            structural_pattern="HH+HL",
+            slope=0.45,
+            bb_width=2.0,
+            name=datetime(2025, 1, 1, 1, 0, tzinfo=timezone.utc),
         )
     )
     assert eng.regime_live_at_last_h1_close() is True

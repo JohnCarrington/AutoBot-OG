@@ -99,6 +99,8 @@ def apply_eod_force_close(
     *,
     current_regime: RegimeLabel,
     current_direction: Optional[Direction],
+    pending_regime: Optional[RegimeLabel] = None,
+    pending_direction: Optional[Direction] = None,
 ) -> list[ForceCloseOrder]:
     """Return force-close orders for positions that must be flat overnight.
 
@@ -112,6 +114,13 @@ def apply_eod_force_close(
     - ``current_pnl_r >= TREND_OVERNIGHT_HOLD_MIN_R`` (default +1R).
     - The engine's current committed regime is still TREND AND its
       direction matches the position's entry direction.
+    - **H3 fix (review 2026-05-14):** no contradicting pending
+      transition is staged. ``pending_regime`` must be either
+      ``None`` (engine settled on the committed TREND), or
+      ``TREND`` with ``pending_direction`` matching the position's
+      entry direction (an in-flight reconfirmation of the same TREND
+      is benign). Any other pending — RANGE, VOLATILE, or
+      opposite-direction TREND — force-closes the position.
 
     Everything else is force-closed at NY close.
     """
@@ -150,6 +159,20 @@ def apply_eod_force_close(
 
         # TREND overnight-hold gates: profit AND regime-still-aligned.
         if pos.current_pnl_r < TREND_OVERNIGHT_HOLD_MIN_R:
+            # H4 (review 2026-05-14): when the entry was inside the
+            # pre-EOD buffer, the trade had no realistic path to
+            # reach +1R before close — surface that in the reason so
+            # post-mortems can identify the wasted-entry scenario.
+            held_seconds = (now_utc - pos.entry_time_utc).total_seconds()
+            held_min = held_seconds / 60.0
+            inside_buffer = 0 <= held_min < PRE_EOD_NO_ENTRY_MIN
+            buffer_note = (
+                f" (entry was {held_min:.1f}min before close, "
+                f"inside {PRE_EOD_NO_ENTRY_MIN}min buffer — "
+                f"no path to {TREND_OVERNIGHT_HOLD_MIN_R}R)"
+                if inside_buffer
+                else ""
+            )
             orders.append(
                 ForceCloseOrder(
                     position_id=pos.position_id,
@@ -158,6 +181,7 @@ def apply_eod_force_close(
                         f"eod_close: trend_below_overnight_R "
                         f"(pnl_r={pos.current_pnl_r:.2f} "
                         f"< {TREND_OVERNIGHT_HOLD_MIN_R})"
+                        f"{buffer_note}"
                     ),
                 )
             )
@@ -185,6 +209,36 @@ def apply_eod_force_close(
                         f"eod_close: trend_direction_changed "
                         f"(entry={pos.direction.value}, "
                         f"current={current_direction.value if current_direction else 'None'})"
+                    ),
+                )
+            )
+            continue
+
+        # H3 (review 2026-05-14): if the engine has an in-flight
+        # pending transition staged, only let TREND survive overnight
+        # when the pending is another TREND in the same direction —
+        # i.e. a benign reconfirmation. RANGE / VOLATILE / opposite-
+        # direction pendings indicate the regime is actively
+        # transitioning away from the committed TREND, so force-close
+        # rather than ride the position through the change overnight.
+        if pending_regime is not None and not (
+            pending_regime == RegimeLabel.TREND
+            and pending_direction == pos.direction
+        ):
+            pending_dir_str = (
+                pending_direction.value
+                if pending_direction is not None
+                else "None"
+            )
+            orders.append(
+                ForceCloseOrder(
+                    position_id=pos.position_id,
+                    pair=pos.pair,
+                    reason=(
+                        f"eod_close: trend_pending_transition "
+                        f"(pending={pending_regime.value}, "
+                        f"pending_dir={pending_dir_str}, "
+                        f"entry_dir={pos.direction.value})"
                     ),
                 )
             )
