@@ -106,6 +106,8 @@ def test_force_close_returns_empty_before_ny_close() -> None:
         now_utc=now,
         current_regime=RegimeLabel.TREND,
         current_direction=Direction.BULLISH,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert orders == []
 
@@ -117,6 +119,8 @@ def test_force_close_empty_for_no_positions() -> None:
         now_utc=now,
         current_regime=RegimeLabel.TREND,
         current_direction=Direction.BULLISH,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert orders == []
 
@@ -132,6 +136,8 @@ def test_force_close_range_at_ny_close() -> None:
         now_utc=now,
         current_regime=RegimeLabel.RANGE,
         current_direction=None,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert len(orders) == 1
     assert orders[0].position_id == "p1"
@@ -145,6 +151,8 @@ def test_force_close_volatile_at_ny_close() -> None:
         now_utc=now,
         current_regime=RegimeLabel.VOLATILE,
         current_direction=None,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert len(orders) == 1
 
@@ -158,6 +166,8 @@ def test_trend_held_overnight_when_profitable_and_aligned_on_weekday() -> None:
         now_utc=now,
         current_regime=RegimeLabel.TREND,
         current_direction=Direction.BULLISH,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert orders == []
 
@@ -170,6 +180,8 @@ def test_trend_closed_when_below_overnight_R() -> None:
         now_utc=now,
         current_regime=RegimeLabel.TREND,
         current_direction=Direction.BULLISH,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert len(orders) == 1
     assert "trend_below_overnight_R" in orders[0].reason
@@ -183,6 +195,8 @@ def test_trend_closed_when_regime_changed() -> None:
         now_utc=now,
         current_regime=RegimeLabel.RANGE,
         current_direction=None,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert len(orders) == 1
     assert "trend_regime_lost" in orders[0].reason
@@ -197,6 +211,8 @@ def test_trend_closed_when_direction_changed() -> None:
         now_utc=now,
         current_regime=RegimeLabel.TREND,
         current_direction=Direction.BEARISH,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert len(orders) == 1
     assert "trend_direction_changed" in orders[0].reason
@@ -210,6 +226,8 @@ def test_trend_closed_on_friday_even_when_profitable() -> None:
         now_utc=now,
         current_regime=RegimeLabel.TREND,
         current_direction=Direction.BULLISH,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert len(orders) == 1
     assert "friday_close" in orders[0].reason
@@ -225,6 +243,8 @@ def test_force_close_emits_one_order_per_position() -> None:
         now_utc=now,
         current_regime=RegimeLabel.RANGE,
         current_direction=None,
+        pending_regime=None,
+        pending_direction=None,
     )
     pids = sorted(o.position_id for o in orders)
     assert pids == ["p1", "p2"]
@@ -238,6 +258,8 @@ def test_force_close_dst_winter() -> None:
         now_utc=now,
         current_regime=RegimeLabel.RANGE,
         current_direction=None,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert len(orders) == 1
 
@@ -363,6 +385,8 @@ def test_trend_below_R_inside_buffer_flags_wasted_entry_in_reason() -> None:
         now_utc=now,
         current_regime=RegimeLabel.TREND,
         current_direction=Direction.BULLISH,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert len(orders) == 1
     reason = orders[0].reason
@@ -392,6 +416,8 @@ def test_trend_below_R_outside_buffer_omits_wasted_entry_note() -> None:
         now_utc=now,
         current_regime=RegimeLabel.TREND,
         current_direction=Direction.BULLISH,
+        pending_regime=None,
+        pending_direction=None,
     )
     assert len(orders) == 1
     reason = orders[0].reason
@@ -422,6 +448,8 @@ def test_mixed_position_basket() -> None:
         now_utc=now,
         current_regime=RegimeLabel.TREND,
         current_direction=Direction.BULLISH,
+        pending_regime=None,
+        pending_direction=None,
     )
     closed_ids = sorted(o.position_id for o in orders)
     # trend_keep and trend_bear (which now also matches direction) survive.

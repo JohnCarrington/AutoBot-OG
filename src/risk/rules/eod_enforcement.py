@@ -99,8 +99,8 @@ def apply_eod_force_close(
     *,
     current_regime: RegimeLabel,
     current_direction: Optional[Direction],
-    pending_regime: Optional[RegimeLabel] = None,
-    pending_direction: Optional[Direction] = None,
+    pending_regime: Optional[RegimeLabel],
+    pending_direction: Optional[Direction],
 ) -> list[ForceCloseOrder]:
     """Return force-close orders for positions that must be flat overnight.
 
@@ -121,6 +121,12 @@ def apply_eod_force_close(
       entry direction (an in-flight reconfirmation of the same TREND
       is benign). Any other pending — RANGE, VOLATILE, or
       opposite-direction TREND — force-closes the position.
+
+    ``pending_regime`` and ``pending_direction`` are **required**
+    keyword-only arguments (N1 follow-up from the 2026-05-14 Session
+    3 review). Defaults are deliberately omitted so a caller that
+    forgets to thread the engine's pending state through fails loudly
+    at the call site rather than silently disabling the H3 gate.
 
     Everything else is force-closed at NY close.
     """
