@@ -245,6 +245,10 @@ def test_broker_orphan_emits_alert_no_action(tmp_path: Path) -> None:
     ]
     assert len(orphans) == 1
     assert orphans[0].severity == ReconciliationSeverity.ALERT
+    # M1 regression (review 2026-05-14): pair must be the symbol
+    # ("GBPUSD"), not the IG epic. The raw epic is preserved in debug.
+    assert orphans[0].pair == "GBPUSD"
+    assert orphans[0].debug["broker_epic"] == "CS.D.GBPUSD.TODAY.IP"
     # No auto-import.
     assert outcome.actions.apply_sl_updates == {}
     assert outcome.actions.remove_deal_ids == ()

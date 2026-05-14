@@ -141,7 +141,9 @@ def test_parse_position_requires_epic() -> None:
 # --- Deal confirmation parsing ---------------------------------------------
 
 
-def test_parse_deal_confirmation_accepted() -> None:
+def test_parse_deal_confirmation_real_ig_accepted_shape() -> None:
+    """Real IG accepted payload: dealStatus=ACCEPTED is canonical;
+    status=OPEN is the lifecycle field."""
     raw = {
         "dealReference": "REF1",
         "dealId": "DEAL1",
@@ -163,16 +165,87 @@ def test_parse_deal_confirmation_accepted() -> None:
     assert confirm.date == datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
 
 
-def test_parse_deal_confirmation_rejected_preserves_reason() -> None:
+def test_parse_deal_confirmation_real_ig_rejected_shape() -> None:
+    """C1 regression (review 2026-05-14): real IG rejected payloads
+    carry ``dealStatus="REJECTED"`` with ``status`` absent entirely.
+    The previous parser keyed on ``status``, so this shape was
+    silently classified as ACCEPTED, causing phantom positions to
+    register and the idempotency key to be consumed.
+    """
     raw = {
-        "dealReference": "REF1",
-        "status": "REJECTED",
+        "dealReference": "REF_REJ_1",
+        "dealStatus": "REJECTED",
         "reason": "MARKET_OFFLINE",
+        # NOTE: no "status" field — that's what real IG sends for rejects.
     }
     confirm = _parse_deal_confirmation(raw)
     assert confirm.status == "REJECTED"
+    assert confirm.deal_status == "REJECTED"
     assert confirm.reason == "MARKET_OFFLINE"
     assert confirm.deal_id is None
+
+
+def test_parse_deal_confirmation_real_ig_rejected_status_null() -> None:
+    """Variant of the C1 case: status explicitly null on the wire."""
+    raw = {
+        "dealReference": "REF_REJ_2",
+        "status": None,
+        "dealStatus": "REJECTED",
+        "reason": "VOLATILITY_TOO_HIGH",
+    }
+    confirm = _parse_deal_confirmation(raw)
+    assert confirm.status == "REJECTED"
+
+
+def test_parse_deal_confirmation_dealStatus_canonical_when_status_disagrees() -> None:
+    """If the two fields disagree, dealStatus wins (it's canonical)."""
+    raw = {
+        "dealReference": "REF_X",
+        "status": "OPEN",
+        "dealStatus": "REJECTED",
+        "reason": "MARKET_CLOSED",
+    }
+    confirm = _parse_deal_confirmation(raw)
+    assert confirm.status == "REJECTED"
+
+
+def test_parse_deal_confirmation_falls_back_to_status_with_warning(caplog) -> None:
+    """Backwards-compat: no dealStatus, status="REJECTED" → REJECTED + WARN."""
+    raw = {
+        "dealReference": "REF_LEGACY",
+        "status": "REJECTED",
+        "reason": "MARKET_OFFLINE",
+    }
+    import logging
+    with caplog.at_level(logging.WARNING, logger="feed.ig_rest.positions"):
+        confirm = _parse_deal_confirmation(raw)
+    assert confirm.status == "REJECTED"
+    assert any("missing canonical dealStatus" in rec.message for rec in caplog.records)
+
+
+def test_parse_deal_confirmation_no_decisive_signal_treated_as_rejected(
+    caplog,
+) -> None:
+    """A confirm with no dealStatus on a 200-OK is itself a fault —
+    err on NOT marking the position open."""
+    raw = {"dealReference": "REF_AMBIGUOUS"}
+    import logging
+    with caplog.at_level(logging.WARNING, logger="feed.ig_rest.positions"):
+        confirm = _parse_deal_confirmation(raw)
+    assert confirm.status == "REJECTED"
+    assert any("no decisive dealStatus" in rec.message for rec in caplog.records)
+
+
+def test_parse_deal_confirmation_amended_lifecycle_still_accepted() -> None:
+    """An amend confirmation has dealStatus=ACCEPTED + status=AMENDED."""
+    raw = {
+        "dealReference": "REF_AMEND",
+        "dealId": "DEAL_AMEND",
+        "status": "AMENDED",
+        "dealStatus": "ACCEPTED",
+    }
+    confirm = _parse_deal_confirmation(raw)
+    assert confirm.status == "ACCEPTED"
 
 
 def test_parse_deal_confirmation_raises_on_non_dict() -> None:
@@ -191,6 +264,7 @@ def test_open_position_forwards_full_args() -> None:
         "dealReference": "REF",
         "dealId": "D1",
         "status": "OPEN",
+        "dealStatus": "ACCEPTED",
         "level": 1.30,
     }
     order = OrderRequest(
@@ -212,7 +286,12 @@ def test_open_position_forwards_full_args() -> None:
 
 def test_amend_position_forwards_stop_and_limit() -> None:
     svc = _FakeService()
-    svc.amend_returns = {"dealReference": "REF", "dealId": "D1", "status": "AMENDED"}
+    svc.amend_returns = {
+        "dealReference": "REF",
+        "dealId": "D1",
+        "status": "AMENDED",
+        "dealStatus": "ACCEPTED",
+    }
     amend_position(
         _session(svc),
         AmendRequest(deal_id="D1", stop_level=1.30010, limit_level=None),
@@ -224,7 +303,12 @@ def test_amend_position_forwards_stop_and_limit() -> None:
 
 def test_close_position_sends_opposite_direction() -> None:
     svc = _FakeService()
-    svc.close_returns = {"dealReference": "REF", "dealId": "D1", "status": "CLOSED"}
+    svc.close_returns = {
+        "dealReference": "REF",
+        "dealId": "D1",
+        "status": "CLOSED",
+        "dealStatus": "ACCEPTED",
+    }
     close_position(
         _session(svc),
         CloseRequest(
@@ -274,7 +358,12 @@ def test_fetch_by_deal_id_unwraps_positions_envelope() -> None:
 
 def test_fetch_deal_confirmation_passes_through() -> None:
     svc = _FakeService()
-    svc.confirm_returns = {"dealReference": "REF", "dealId": "D1", "status": "OPEN"}
+    svc.confirm_returns = {
+        "dealReference": "REF",
+        "dealId": "D1",
+        "status": "OPEN",
+        "dealStatus": "ACCEPTED",
+    }
     confirm = fetch_deal_confirmation(_session(svc), "REF")
     assert confirm.status == "ACCEPTED"
     assert svc.confirm_calls == ["REF"]

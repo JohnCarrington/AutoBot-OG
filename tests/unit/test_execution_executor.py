@@ -45,8 +45,10 @@ class _FakeIGClient:
         self.close_calls: list[CloseRequest] = []
         self.open_returns: list[DealConfirmation] = []
         self.amend_returns: list[DealConfirmation] = []
+        self.close_returns: list[DealConfirmation] = []
         self.open_exceptions: list[BaseException] = []
         self.amend_exceptions: list[BaseException] = []
+        self.close_exceptions: list[BaseException] = []
 
     # --- Configuration --------------------------------------------------
 
@@ -80,9 +82,28 @@ class _FakeIGClient:
             raise AssertionError("no queued amend confirmation")
         return self.amend_returns.pop(0)
 
+    # --- Close (used by M2 emergency-close path) -----------------------
+
+    def queue_close(self, confirmation: DealConfirmation) -> None:
+        self.close_returns.append(confirmation)
+
+    def queue_close_exception(self, exc: BaseException) -> None:
+        self.close_exceptions.append(exc)
+
     def close_position(self, close: CloseRequest) -> DealConfirmation:
         self.close_calls.append(close)
-        raise AssertionError("not exercised in these tests")
+        if self.close_exceptions:
+            raise self.close_exceptions.pop(0)
+        if self.close_returns:
+            return self.close_returns.pop(0)
+        # Default: a synthetic ACCEPTED close confirm.
+        return DealConfirmation(
+            deal_reference="REF_CLOSE",
+            deal_id=close.deal_id,
+            status="ACCEPTED",
+            deal_status="ACCEPTED",
+            raw={},
+        )
 
     def fetch_open_positions(self) -> list[BrokerPosition]:  # pragma: no cover
         return []
@@ -127,7 +148,7 @@ def _accept(
         deal_reference=deal_reference,
         deal_id=deal_id,
         status="ACCEPTED",
-        deal_status="OPEN",
+        deal_status="ACCEPTED",
         epic="CS.D.GBPUSD.TODAY.IP",
         direction="BUY",
         size=1.0,
@@ -207,7 +228,44 @@ def test_open_from_signal_rejection_returns_failure(tmp_path: Path) -> None:
     result = executor.open_from_signal(_ig_signal())
     assert result.success is False
     assert "broker_rejected" in (result.rejection_reason or "")
+    assert "dealStatus=REJECTED" in (result.rejection_reason or "")
     assert len(mgr) == 0
+
+
+def test_open_from_signal_real_ig_rejected_shape_does_not_register_position(
+    tmp_path: Path,
+) -> None:
+    """C1 regression (review 2026-05-14): a real-shape IG REJECTED
+    confirmation (``dealStatus="REJECTED"``, no ``status`` field) must
+    flow through the parser → executor pipeline as ``success=False``
+    and leave ``PositionManager`` empty. Pre-fix, the parser silently
+    classified this as ACCEPTED, registering a phantom position and
+    consuming the idempotency key.
+    """
+    from feed.ig_rest.positions import _parse_deal_confirmation
+
+    real_ig_rejected_payload = {
+        "dealReference": "REF_REJ",
+        "dealStatus": "REJECTED",
+        "reason": "MARKET_OFFLINE",
+        # NOTE: no "status" field — that's what real IG sends for rejects.
+    }
+    parsed = _parse_deal_confirmation(real_ig_rejected_payload)
+    assert parsed.status == "REJECTED"  # parser-level sanity
+
+    executor, fake, mgr = _make_executor(tmp_path)
+    fake.queue_open(parsed)
+    sig = _ig_signal()
+    result = executor.open_from_signal(sig)
+
+    assert result.success is False
+    assert len(mgr) == 0
+    # And the idempotency key was NOT consumed — a retry of the same
+    # signal must be allowed to fire (e.g. when the strategy emits the
+    # same setup on the next polling cycle if market reopens).
+    assert mgr.by_signal_source(
+        sig.pair, sig.strategy_name, sig.source_candle_ts
+    ) is None
 
 
 def test_open_from_signal_allowance_exceeded_returns_failure(tmp_path: Path) -> None:
@@ -326,6 +384,64 @@ def test_apply_amend_double_failure_returns_failure(tmp_path: Path) -> None:
     pos = mgr.get("D1")
     assert pos is not None and pos.current_sl_price == 1.29850
     assert pos.be_moved is False
+
+
+def test_open_from_signal_persist_failure_emergency_closes_and_raises(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """M2 regression (review 2026-05-14): when persistence fails after
+    the broker has accepted the open, the executor must (a) log
+    CRITICAL, (b) attempt an emergency close on the broker, (c)
+    re-raise the original exception so the caller crashes loudly
+    rather than continuing with desynced local state.
+    """
+    executor, fake, mgr = _make_executor(tmp_path)
+    fake.queue_open(_accept(deal_id="DEAL_PERSIST_FAIL"))
+
+    def _boom(_pos) -> None:
+        raise OSError("ENOSPC: no space left on device")
+
+    monkeypatch.setattr(mgr, "upsert", _boom)
+
+    with pytest.raises(OSError, match="ENOSPC"):
+        executor.open_from_signal(_ig_signal())
+
+    # Emergency close was attempted with the original direction
+    # translated to BUY (long position → emergency close uses BUY,
+    # which the IG wrapper will flip to SELL inside close_position).
+    assert len(fake.close_calls) == 1
+    close_req = fake.close_calls[0]
+    assert close_req.deal_id == "DEAL_PERSIST_FAIL"
+    assert close_req.position_direction == "BUY"
+    assert close_req.size == 1.0
+
+
+def test_open_from_signal_persist_failure_close_also_fails_still_raises_original(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """M2: even when the emergency-close call ALSO fails, the original
+    persistence error propagates (the emergency-close outcome is on
+    the log only). Both failures must be logged at CRITICAL.
+    """
+    import logging
+
+    executor, fake, mgr = _make_executor(tmp_path)
+    fake.queue_open(_accept(deal_id="DEAL_DOUBLE_FAIL"))
+    fake.queue_close_exception(RuntimeError("connection refused"))
+
+    def _boom(_pos) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mgr, "upsert", _boom)
+
+    with caplog.at_level(logging.CRITICAL, logger="execution.executor"):
+        with pytest.raises(OSError, match="disk full"):
+            executor.open_from_signal(_ig_signal())
+
+    # Both criticals logged.
+    messages = [r.message for r in caplog.records if r.levelno == logging.CRITICAL]
+    assert any("Persist failed" in m for m in messages)
+    assert any("Emergency close ALSO FAILED" in m for m in messages)
 
 
 def test_apply_amend_rejected_status_returns_failure(tmp_path: Path) -> None:

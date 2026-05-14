@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional
 
-from config.pair_config import pip_size_for, price_to_pips
+from config.pair_config import pair_from_epic, pip_size_for, price_to_pips
 from feed.ig_rest import BrokerPosition
 
 from .constants import (
@@ -180,13 +180,21 @@ def reconcile(
             if EXECUTION_BROKER_ORPHAN_ALERT
             else ReconciliationSeverity.WARNING
         )
+        # M1 (review 2026-05-14): every other branch sets ``pair`` to
+        # the pair *symbol* (``"GBPUSD"``) — only the orphan branch
+        # previously used the raw IG ``epic`` (``"CS.D.GBPUSD.TODAY.IP"``).
+        # Phase 7's alerts module groups events by ``pair``; mixed
+        # symbol/epic values would silently miss orphan rows in any
+        # per-pair summary. Normalise to the symbol here and keep the
+        # raw epic in ``debug``.
+        resolved_pair = pair_from_epic(broker.epic)
         events.append(
             ReconciliationEvent(
                 at_utc=now,
                 severity=severity,
                 kind=ReconciliationKind.BROKER_ORPHAN,
                 deal_id=deal_id,
-                pair=broker.epic,
+                pair=resolved_pair,
                 message=(
                     f"broker reports open position {deal_id} ({broker.epic}, "
                     f"{broker.direction}, size={broker.size}) that has no "
@@ -194,6 +202,7 @@ def reconcile(
                     f"the bot will manage it."
                 ),
                 debug={
+                    "broker_epic": broker.epic,
                     "broker_open_level": broker.open_level,
                     "broker_stop_level": broker.stop_level,
                     "broker_direction": broker.direction,

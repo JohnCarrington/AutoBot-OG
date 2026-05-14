@@ -28,17 +28,20 @@ class _StubService:
                 "dealReference": "REF",
                 "dealId": "D1",
                 "status": "OPEN",
+                "dealStatus": "ACCEPTED",
                 "level": 1.30,
             },
             "update_open_position": {
                 "dealReference": "REF",
                 "dealId": "D1",
                 "status": "AMENDED",
+                "dealStatus": "ACCEPTED",
             },
             "close_open_position": {
                 "dealReference": "REF",
                 "dealId": "D1",
                 "status": "CLOSED",
+                "dealStatus": "ACCEPTED",
             },
             "fetch_open_positions": {"positions": []},
             "fetch_open_position_by_deal_id": None,
@@ -46,6 +49,7 @@ class _StubService:
                 "dealReference": "REF",
                 "dealId": "D1",
                 "status": "OPEN",
+                "dealStatus": "ACCEPTED",
             },
         }
 

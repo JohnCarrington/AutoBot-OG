@@ -14,6 +14,7 @@ these primitives.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -25,6 +26,9 @@ from .types import (
     DealConfirmation,
     OrderRequest,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -195,7 +199,38 @@ def _parse_position(item: dict) -> BrokerPosition:
 
 
 def _parse_deal_confirmation(raw: Any) -> DealConfirmation:
-    """Build a :py:class:`DealConfirmation` from IG's ``/confirms`` payload."""
+    """Build a :py:class:`DealConfirmation` from IG's ``/confirms`` payload.
+
+    Status resolution
+    -----------------
+    IG's ``/confirms/{dealReference}`` payload carries **two** orthogonal
+    status fields and the parser must key on the right one — this is
+    the C1 fix from the 2026-05-14 review:
+
+    - ``dealStatus``: the canonical outcome flag — ``"ACCEPTED"`` or
+      ``"REJECTED"``. Present on every well-formed confirm.
+    - ``status``: the position-lifecycle field — ``"OPEN"``,
+      ``"UPDATED"``, ``"AMENDED"``, ``"CLOSED"``, ``"DELETED"`` on
+      accepted deals; absent or ``null`` on rejected deals.
+
+    The previous parser read ``status`` and treated anything other than
+    the literal ``"REJECTED"`` (a value IG never puts there) as
+    ACCEPTED — silently classifying every real IG rejection as a
+    successful open. This caused phantom positions to register, the
+    idempotency key to be consumed, and recurring ``MISSING_LOCAL_KEPT``
+    alerts at reconciliation.
+
+    Decision tree, in order:
+
+    1. ``dealStatus == "REJECTED"`` → REJECTED (canonical path).
+    2. ``dealStatus == "ACCEPTED"`` → ACCEPTED (canonical path).
+    3. ``dealStatus`` empty AND ``status == "REJECTED"`` → REJECTED
+       + log WARNING (backwards-compat for synthetic fixtures or
+       library-mock variations putting the verdict in ``status``).
+    4. No decisive accept signal → REJECTED + log WARNING. A confirm
+       payload with no ``dealStatus`` on an HTTP-200 response is itself
+       a fault; err on NOT marking the position open.
+    """
     if raw is None or not isinstance(raw, dict):
         raise ValueError(
             f"unexpected deal-confirmation payload type: {type(raw).__name__}"
@@ -209,13 +244,32 @@ def _parse_deal_confirmation(raw: Any) -> DealConfirmation:
         else None
     )
 
-    raw_status = str(raw.get("status") or "").strip().upper()
-    # IG sometimes returns "OPEN" / "UPDATED" / "AMENDED" for accepted
-    # operations; "REJECTED" is the unambiguous failure.
-    if raw_status == "REJECTED":
-        status: Any = "REJECTED"
-    else:
+    raw_deal_status = str(raw.get("dealStatus") or "").strip().upper()
+    raw_lifecycle = str(raw.get("status") or "").strip().upper()
+    status: Any
+    if raw_deal_status == "REJECTED":
+        status = "REJECTED"
+    elif raw_deal_status == "ACCEPTED":
         status = "ACCEPTED"
+    elif raw_lifecycle == "REJECTED":
+        logger.warning(
+            "deal confirmation missing canonical dealStatus but lifecycle "
+            "'status' is REJECTED (deal_reference=%s); treating as "
+            "REJECTED. Verify the IG response shape — this fallback path "
+            "should not fire for real IG payloads.",
+            deal_ref or "<unknown>",
+        )
+        status = "REJECTED"
+    else:
+        logger.warning(
+            "deal confirmation has no decisive dealStatus / status "
+            "(deal_reference=%s, raw_keys=%s); treating as REJECTED "
+            "conservatively. A well-formed IG confirm must include "
+            "dealStatus=ACCEPTED|REJECTED.",
+            deal_ref or "<unknown>",
+            sorted(raw.keys()),
+        )
+        status = "REJECTED"
 
     raw_direction = raw.get("direction")
     direction = (

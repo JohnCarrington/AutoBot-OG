@@ -28,6 +28,7 @@ from typing import Callable, Optional
 from feed.ig_rest import (
     AllowanceExceeded,
     AmendRequest,
+    CloseRequest,
     DealConfirmation,
     IGClient,
     OrderRequest,
@@ -167,13 +168,17 @@ class Executor:
             )
 
         if confirmation.status != "ACCEPTED" or not confirmation.deal_id:
+            # Post-C1: ``confirmation.status`` is already derived from
+            # IG's canonical ``dealStatus`` field, so this string need
+            # not surface the lifecycle field as well — it was
+            # actively misleading in logs ("status=ACCEPTED,
+            # deal_status=REJECTED" for real rejections).
             return TradeResult(
                 success=False,
                 deal_id=confirmation.deal_id,
                 deal_reference=confirmation.deal_reference,
                 rejection_reason=(
-                    f"broker_rejected:status={confirmation.status},"
-                    f"deal_status={confirmation.deal_status},"
+                    f"broker_rejected:dealStatus={confirmation.deal_status},"
                     f"reason={confirmation.reason}"
                 ),
             )
@@ -184,7 +189,61 @@ class Executor:
             confirmation=confirmation,
             now_utc=self._clock(),
         )
-        self._positions.upsert(position)
+        # M2 (review 2026-05-14): if the persistence call fails (disk
+        # full, permission denied, ENOSPC mid-fsync), the broker has
+        # an open position while our local state knows nothing about
+        # it. The pre-fix code let the OSError propagate while
+        # silently leaving the position open at IG; on the next bot
+        # restart the position would surface as BROKER_ORPHAN
+        # (ALERT, operator action). Fail loudly instead: log CRITICAL,
+        # attempt an emergency close on the broker, and re-raise the
+        # original exception so the caller (Phase 7 loop) can crash
+        # rather than continue with desynced state.
+        try:
+            self._positions.upsert(position)
+        except Exception as upsert_exc:
+            logger.critical(
+                "Persist failed after broker accepted open: "
+                "deal_id=%s, pair=%s, exception=%r. Attempting "
+                "emergency close on broker. Operator must verify "
+                "no orphan position remains.",
+                confirmation.deal_id,
+                signal.pair,
+                upsert_exc,
+                exc_info=True,
+            )
+            try:
+                self._client.close_position(
+                    CloseRequest(
+                        deal_id=confirmation.deal_id or "",
+                        epic=epic,
+                        position_direction=(
+                            "BUY"
+                            if order.direction == Direction.BULLISH
+                            else "SELL"
+                        ),
+                        size=order.size_units,
+                    )
+                )
+                logger.critical(
+                    "Emergency close submitted for deal_id=%s after "
+                    "persist failure.",
+                    confirmation.deal_id,
+                )
+            except Exception as close_exc:  # noqa: BLE001
+                logger.critical(
+                    "Emergency close ALSO FAILED for deal_id=%s "
+                    "after persist failure: %r. MANUAL INTERVENTION "
+                    "REQUIRED — broker may have an unmanaged open "
+                    "position.",
+                    confirmation.deal_id,
+                    close_exc,
+                    exc_info=True,
+                )
+            # Re-raise the *original* persistence error so the caller
+            # sees the root cause; the emergency-close outcome is on
+            # the log.
+            raise
         return TradeResult(
             success=True,
             deal_id=position.deal_id,
