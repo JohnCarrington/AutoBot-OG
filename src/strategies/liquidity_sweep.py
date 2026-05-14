@@ -21,6 +21,7 @@ Additional gates
 """
 from __future__ import annotations
 
+import logging
 import math
 from datetime import datetime
 from typing import Any, Optional
@@ -44,6 +45,7 @@ from .signal import Signal, compute_invalid_after
 
 
 _STRATEGY_NAME = "liquidity_sweep"
+_logger = logging.getLogger(__name__)
 
 
 def detect_liquidity_sweep(
@@ -83,6 +85,20 @@ def detect_liquidity_sweep(
     # session gating reproducible across both modes (H1, review 2026-05-14).
     confirmation_ts = confirmation.name
     if not isinstance(confirmation_ts, datetime):
+        # N1 follow-up (review 2026-05-14): a non-DatetimeIndex on
+        # ``df_m5`` makes session gating impossible. Silently returning
+        # ``None`` (as the H1 fix originally did) hides the misconfiguration
+        # from test fixtures and backtest harnesses that build raw
+        # DataFrames. Surface it loudly via the strategy logger so the
+        # caller can spot the omission. We still return ``None`` — the
+        # gate cannot meaningfully evaluate without a real timestamp.
+        _logger.warning(
+            "liquidity_sweep: df_m5 has non-DatetimeIndex "
+            "(confirmation bar name type=%s); cannot evaluate session gate, "
+            "returning None. Ensure the M5 DataFrame uses a "
+            "pd.DatetimeIndex with timezone-aware timestamps.",
+            type(confirmation_ts).__name__,
+        )
         return None
     if not (
         london_session(confirmation_ts) or ny_session(confirmation_ts)
