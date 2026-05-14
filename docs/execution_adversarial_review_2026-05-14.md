@@ -593,3 +593,319 @@ spec. The integration shape — composable `IGClient` + free-function
 clean and testable.
 
 Tests: **565 passed in 2.19s**.
+
+---
+
+# Addendum — re-review after C1 / M2 / M1 fixes (commit `acae469`)
+
+- **Date:** 2026-05-14 (same day, post-fix).
+- **Commit reviewed:** `acae469` (`fix(execution): C1 ... M2 ... M1 ...`).
+- **Scope:** verify the three fixes; check for regressions and new issues.
+- **Test status:** `573 passed in 2.10s` — full suite green, +8 net tests.
+
+## Headline
+
+All three blocking findings are fixed correctly. The C1 fix uses the
+documented IG canonical field (`dealStatus`) with a conservative
+fallback that only flips a hypothetical edge case (empty / whitespace
+`dealStatus`) into REJECTED + WARNING — and real IG payloads never
+contain those. The M2 fix wires up the emergency-close path with both
+required CRITICAL log entries firing in both branches. The M1 fix
+normalises orphan-event `pair` via `pair_from_epic` and preserves the
+raw epic in `debug`.
+
+Two new LOW-severity observations surface (R1, R2 below). Neither
+blocks merge.
+
+## Verification of each fix
+
+### C1 — `_parse_deal_confirmation` decision tree
+
+**File:** `src/feed/ig_rest/positions.py:197-271`
+
+New decision tree, walked through end-to-end:
+
+| input shape                                                  | result    | warns? |
+|--------------------------------------------------------------|-----------|--------|
+| `dealStatus="ACCEPTED"`, `status="OPEN"` (real accepted)     | ACCEPTED  | no     |
+| `dealStatus="ACCEPTED"`, `status="AMENDED"` (real amend)     | ACCEPTED  | no     |
+| `dealStatus="ACCEPTED"`, `status="UPDATED"`                  | ACCEPTED  | no     |
+| `dealStatus="ACCEPTED"`, `status="CLOSED"` (real close)      | ACCEPTED  | no     |
+| `dealStatus="REJECTED"` (no `status`) — **real C1 case**     | REJECTED  | no     |
+| `dealStatus="REJECTED"`, `status=null` — **real C1 case**    | REJECTED  | no     |
+| `dealStatus="accepted"` (lowercase)                          | ACCEPTED  | no     |
+| `status="REJECTED"`, no `dealStatus` (legacy/synthetic)      | REJECTED  | yes    |
+| `dealStatus="ACCEPTED"`, `status="REJECTED"` (conflict)      | ACCEPTED  | no     |
+| empty dict                                                   | REJECTED  | yes    |
+| `status="OPEN"`, no `dealStatus`                             | REJECTED  | yes    |
+
+The conflict case (`dealStatus=ACCEPTED` + `status=REJECTED`) correctly
+prefers `dealStatus` — `status` is the lifecycle field, not the
+verdict.
+
+**Q: Does the conservative-REJECTED fallback flip real ACCEPTED responses?**
+
+No. The fallback fires only when `dealStatus` is empty or whitespace.
+IG's REST contract guarantees `dealStatus ∈ {"ACCEPTED", "REJECTED"}`
+on every well-formed `/confirms` response (which `trading_ig`'s
+`create_open_position` always fetches internally — see
+`.venv/lib/python3.12/site-packages/trading_ig/rest.py:867-868`). The
+two flip-paths I found probing:
+
+- `dealStatus=""`  → REJECTED + WARNING.
+- `dealStatus="  "` (whitespace) → REJECTED + WARNING.
+
+These are not real IG shapes; the previous parser silently treated
+them as ACCEPTED (because `status="OPEN"` doesn't equal `"REJECTED"`).
+The new behavior is strictly more conservative and the WARNING surfaces
+the anomaly. ✅
+
+**End-to-end probe (Executor + parser):**
+
+```
+Real-IG REJECTED payload through Executor.open_from_signal:
+  result.success=False
+  manager has 0 positions
+  by_signal_source lookup returns None
+  → idempotency key NOT consumed; signal can retry next cycle
+```
+
+**Idempotency unblocked**: probed a sequence of `[REJECT, ACCEPT]`
+calls with the same `(pair, strategy, source_ts)` triple — second
+attempt succeeds because the rejection didn't register a phantom
+position. This is the desired correction.
+
+### M2 — Persistence failure triggers emergency close
+
+**File:** `src/execution/executor.py:189-249`
+
+Both branches probed:
+
+**CASE A — persist fails, close succeeds:**
+```
+OSError("disk full") re-raised
+open_calls=1, close_calls=1
+CRITICAL log records: 2
+  [CRITICAL] Persist failed after broker accepted open: deal_id=D1, pair=GBPUSD, ...
+  [CRITICAL] Emergency close submitted for deal_id=D1 after persist failure.
+```
+
+**CASE B — persist fails, close ALSO fails:**
+```
+OSError("disk full") re-raised (NOT the RuntimeError from close)
+open_calls=1, close_calls=1
+CRITICAL log records: 2
+  [CRITICAL] Persist failed after broker accepted open: deal_id=D1, pair=GBPUSD, ...
+  [CRITICAL] Emergency close ALSO FAILED for deal_id=D1 after persist failure: ... MANUAL INTERVENTION REQUIRED ...
+```
+
+Both CRITICAL logs fire in both branches; the original `OSError` is
+re-raised, not the secondary close exception (correct — root cause
+must surface first). The exception chain is preserved via the natural
+re-raise (no `raise ... from None`).
+
+**Direction mapping on emergency close:** verified correct. A BULLISH
+open emits `CloseRequest(position_direction="BUY")`, which the
+positions wrapper flips to broker `direction="SELL"` to close the
+position. The unit-test assertion at the executor boundary stops at
+`position_direction == "BUY"` because the wrapper isn't under test in
+that case.
+
+### M1 — `pair_from_epic` on orphan events
+
+**File:** `src/execution/reconciliation.py:180-211`
+
+`pair_from_epic` (from `config/pair_config.py:87-94`) returns a
+**non-None string** for every input — split on "." and take index 2,
+else upper-case the input. Probed:
+
+| epic                          | resolved pair    |
+|-------------------------------|------------------|
+| `CS.D.GBPUSD.TODAY.IP`        | `"GBPUSD"`       |
+| `IX.D.SPDOW.DAILY.IP` (index) | `"SPDOW"`        |
+| `"GBPUSD"` (bare)             | `"GBPUSD"`       |
+| `"weird-style"`               | `"WEIRD-STYLE"`  |
+| `""`                          | `""`             |
+
+**Q: Does `pair_from_epic` return `None` and cause downstream issues?**
+
+No — the function's return type is `str` (never `Optional[str]`). The
+downstream `ReconciliationEvent.pair: Optional[str]` field can therefore
+hold a malformed-looking string (`"WEIRD-STYLE"`, `""`) but never
+`None` from this path. No `NoneType` errors are reachable.
+
+For non-forex epics (FTSE/SPDOW etc.), the "pair" field carries the
+index symbol — which v1's Phase 7 alerts can't group sensibly because
+v1 only trades forex. Two mitigating facts:
+
+1. An orphan broker position on a non-forex epic is itself anomalous
+   and surfaces as an ALERT-severity orphan event — the operator will
+   investigate, not auto-aggregate.
+2. The raw IG epic is preserved in `debug["broker_epic"]` for full
+   diagnostic context.
+
+The test (`test_broker_orphan_emits_alert_no_action`) now asserts both
+the normalised pair and the preserved raw epic. ✅
+
+### Test fixture realism
+
+The new fixtures match IG's documented `/confirms` payload shape:
+
+- `test_parse_deal_confirmation_real_ig_accepted_shape` — `dealStatus=ACCEPTED`
+  + `status=OPEN` (the real-world standard shape).
+- `test_parse_deal_confirmation_real_ig_rejected_shape` — `dealStatus=REJECTED`
+  with **no `status` field** (documented as "no status field — that's
+  what real IG sends for rejects" in the test docstring).
+- `test_parse_deal_confirmation_real_ig_rejected_status_null` — variant
+  with `status=null` on the wire.
+- `test_parse_deal_confirmation_amended_lifecycle_still_accepted` —
+  `dealStatus=ACCEPTED` + `status=AMENDED` for amend confirms.
+
+These match the schema described by trading_ig's `fetch_deal_by_deal_reference`
+(`/confirms/{deal_reference}` endpoint) and the IG REST API
+documentation. Not based on docstring examples — derived from
+empirical knowledge of IG's wire format. The `_FakeService` payloads
+in the other tests were also updated to include `dealStatus="ACCEPTED"`
+alongside the existing lifecycle status, so they're more faithful to
+real responses now. ✅
+
+### Synthetic test removal
+
+The previously-passing synthetic-shape test `test_parse_deal_confirmation_rejected_preserves_reason`
+was **rewritten with a new name** (`test_parse_deal_confirmation_real_ig_rejected_shape`),
+not commented out. The rewrite:
+
+- Renames the function so a casual `git log -L` or `grep` for the old
+  name returns nothing — no risk of resurrection.
+- Replaces the synthetic payload (`status: "REJECTED"`) with the real
+  IG shape (`dealStatus: "REJECTED"`, no `status`).
+- Adds an explicit docstring naming the C1 review.
+- Adds an in-code comment in the fixture: `# NOTE: no "status" field —
+  that's what real IG sends for rejects.`
+
+The old shape lives on as a backwards-compat coverage in the new
+`test_parse_deal_confirmation_falls_back_to_status_with_warning` test
+— but explicitly framed as the fallback path, with a WARNING assertion
+to keep it honest. ✅
+
+## New observations introduced by the fixes
+
+### R1 (LOW — observation) — In-memory state desync on persist failure
+
+**File:** `src/execution/position_manager.py:91-98`
+
+`PositionManager.upsert` updates in-memory state **before** calling
+`save_if_dirty()`:
+
+```python
+def upsert(self, position):
+    previous = self._state.get(position.deal_id)
+    if previous is not None:
+        self._index_remove(previous)
+    self._state.upsert(position)        # in-memory mutation
+    self._index_add(position)
+    self._state.save_if_dirty()         # raises on disk failure
+```
+
+When the save fails, the in-memory state already holds the position
+and both indices reflect it. The executor's M2 path then catches the
+exception, emergency-closes at the broker, and re-raises. The
+in-memory state is now **desynced** from the broker (broker closed it)
+**and** from disk (disk never saw the write).
+
+**Why this is acceptable:**
+
+- The plan and the M2 commit explicitly re-raise so the caller (Phase
+  7 loop) crashes loudly. On crash, the in-memory state is gone.
+- On restart, `PositionManager.load_from_path` reads from disk —
+  which never received the write — and the loaded state matches the
+  (now-closed) broker state.
+- Therefore the desync window exists only during the brief gap
+  between raise and process death.
+
+**Why it's worth flagging:**
+
+If a future caller catches the `OSError` and continues without
+restarting, the in-memory state will stay desynced from disk and
+broker indefinitely. The next `reconciliation` pass would re-find the
+phantom (local has it, broker doesn't) as `MISSING_LOCAL_KEPT` — but
+that recovery is alert-driven, not automatic.
+
+**Fix outline (Phase 7 timing):** the executor's persist-failure block
+could also call `self._positions.remove(confirmation.deal_id)` after
+the emergency close, to scrub in-memory state before re-raising. Doing
+so safely requires `remove` to be infallible (it touches disk too); a
+simpler approach is to clear in-memory state directly via a new
+`PositionsState.discard_in_memory(deal_id)` that doesn't attempt to
+save. Not needed for v1 if Phase 7 commits to crash-on-OSError.
+
+**Severity:** LOW. Doesn't block merge; document the expected
+caller behavior.
+
+### R2 (LOW — observation) — Conservative-REJECTED fallback path is silent in production logs by default
+
+**File:** `src/feed/ig_rest/positions.py:251-269`
+
+The two conservative-fallback branches log at `WARNING` level. If
+the production log configuration is set to `ERROR` or higher (common
+in busy bots), these warnings disappear — and the bot silently
+reports REJECTED on a payload that may merit operator inspection.
+
+**Severity:** LOW. The behavior is still safe (REJECTED, not phantom
+ACCEPTED), but observability is degraded. Worth ensuring the bot's
+final root-logger config keeps `feed.ig_rest.positions` at WARNING
+or above. Could be promoted to `ERROR` level if Phase 7 wires alerts
+to the IG shim — these are anomaly events, not normal-path warnings.
+
+## Status of pre-fix findings
+
+| ID | Severity | Status         | Notes                                              |
+|----|----------|----------------|----------------------------------------------------|
+| C1 | CRITICAL | **FIXED**      | Parser keys on `dealStatus`; tests realistic.      |
+| M1 | MEDIUM   | **FIXED**      | `pair_from_epic` + `debug["broker_epic"]`.         |
+| M2 | MEDIUM   | **FIXED**      | Emergency close + dual-CRITICAL logging.           |
+| L1 | LOW      | not addressed  | Amend retry wastes attempt on REJECTED status.     |
+| L2 | LOW      | not addressed  | `_parse_deal_confirmation` direction allow-list.   |
+| L3 | LOW      | not addressed  | Backoff schedule not env-overridable.              |
+| L4 | LOW      | not addressed  | `_is_manual_move` 5-decimal rounding GBPUSD-only.  |
+| L5 | LOW      | **FIXED**      | Subsumed by C1 fixture rewrite (7 tests now).      |
+| R1 | LOW      | new this pass  | In-memory state desync on persist failure.         |
+| R2 | LOW      | new this pass  | Conservative-fallback WARNING visibility.          |
+
+## Final test status
+
+```
+$ .venv/bin/python -m pytest tests/ -q
+............................................................................. (573 dots)
+573 passed in 2.10s
+```
+
+8 net new tests (573 - 565), zero warnings, zero skips, zero errors.
+The targeted re-verification of the changed files:
+
+```
+tests/unit/test_ig_rest_positions.py::test_parse_deal_confirmation_real_ig_accepted_shape PASSED
+tests/unit/test_ig_rest_positions.py::test_parse_deal_confirmation_real_ig_rejected_shape PASSED
+tests/unit/test_ig_rest_positions.py::test_parse_deal_confirmation_real_ig_rejected_status_null PASSED
+tests/unit/test_ig_rest_positions.py::test_parse_deal_confirmation_dealStatus_canonical_when_status_disagrees PASSED
+tests/unit/test_ig_rest_positions.py::test_parse_deal_confirmation_falls_back_to_status_with_warning PASSED
+tests/unit/test_ig_rest_positions.py::test_parse_deal_confirmation_no_decisive_signal_treated_as_rejected PASSED
+tests/unit/test_ig_rest_positions.py::test_parse_deal_confirmation_amended_lifecycle_still_accepted PASSED
+tests/unit/test_execution_executor.py::test_open_from_signal_real_ig_rejected_shape_does_not_register_position PASSED
+tests/unit/test_execution_executor.py::test_open_from_signal_persist_failure_emergency_closes_and_raises PASSED
+tests/unit/test_execution_executor.py::test_open_from_signal_persist_failure_close_also_fails_still_raises_original PASSED
+tests/unit/test_execution_reconciliation.py::test_broker_orphan_emits_alert_no_action PASSED (with new M1 assertions)
+```
+
+## Final recommendation
+
+**APPROVE FOR MERGE.**
+
+The three blocking findings (C1, M2, M1) are fixed correctly with
+realistic test coverage. The two new observations (R1, R2) are
+LOW-severity and do not block merge — they are documentation of
+expected behavior and observability hygiene, not bugs. The remaining
+LOW items (L1-L4) from the original review can land in follow-up
+PRs as agreed.
+
+Phase 6 is ready for merge into `develop`.
