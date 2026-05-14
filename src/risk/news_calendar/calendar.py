@@ -185,6 +185,10 @@ def get_actual_for_event(
         "forecast": float(estimate) if estimate is not None else None,
         "forecast_str": str(estimate) if estimate is not None else "",
         "previous": best.get("prev"),
+        # Raw Finnhub time string for diagnostics / logging (review M2).
+        # The parsed-datetime form is internal to ``is_blackout``; callers
+        # that need a datetime can re-parse this via ``_parse_event_time``.
+        "event_time": best.get("time"),
     }
 
     # Surprise/beat-miss preference order:
@@ -273,20 +277,73 @@ class BlackoutResult:
     confidence: str
 
 
-def _parse_event_time(time_str: str) -> Optional[datetime]:
-    """Parse Finnhub's ``"YYYY-MM-DD HH:MM:SS"`` (UTC) into an aware datetime.
+def _parse_event_time(time_str: Any) -> Optional[datetime]:
+    """Parse an event time string or numeric into a UTC-aware ``datetime``.
 
-    Finnhub returns naive ISO-like strings; the API documents the times
-    as UTC, so we tag them accordingly. Returns ``None`` on any parse
-    error so the caller can skip the entry rather than raise.
+    Handles multiple incoming representations because Finnhub's response
+    format has shifted over time and a Phase-4 callsite that passes
+    cached data through different code paths can produce any of these.
+    Naive datetimes are interpreted as UTC (the documented Finnhub
+    convention).
+
+    Supported inputs (tried in order):
+
+    - ``int`` or ``float``: Unix epoch seconds.
+    - String matching ``datetime.fromisoformat``: covers
+      ``"YYYY-MM-DD HH:MM:SS"`` (legacy Finnhub), ``"YYYY-MM-DDTHH:MM:SS"``
+      (ISO 8601), ``"...Z"`` (UTC marker), ``"...±HH:MM"`` (offset).
+      Python 3.11+ ``fromisoformat`` natively handles all of these.
+    - Numeric string: parsed as Unix epoch seconds.
+
+    On all attempts failing the function logs a WARNING and returns
+    ``None`` — the caller can skip the entry rather than raise. The
+    warning intentionally surfaces unparseable strings so a Finnhub
+    format change is loud rather than silently dropping events from
+    blackout evaluation (review N1).
     """
-    if not time_str:
+    if time_str is None:
         return None
+
+    # Numeric Unix timestamp (int or float — but not bool, which is an
+    # int subclass and would silently parse as 0/1).
+    if isinstance(time_str, bool):
+        logger.warning("[NEWS-CAL] could not parse event time %r", time_str)
+        return None
+    if isinstance(time_str, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(time_str), tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            logger.warning("[NEWS-CAL] could not parse event time %r", time_str)
+            return None
+
+    s = str(time_str).strip()
+    if not s:
+        return None
+
+    # Python 3.11+ fromisoformat handles every string form we care about:
+    # space-separated, T-separated, Z suffix, ±HH:MM and ±HHMM offsets.
     try:
-        dt = datetime.strptime(str(time_str).strip(), "%Y-%m-%d %H:%M:%S")
-    except (ValueError, TypeError):
-        return None
-    return dt.replace(tzinfo=timezone.utc)
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        dt = None
+
+    if dt is not None:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+
+    # Numeric string — Unix seconds.
+    try:
+        return datetime.fromtimestamp(float(s), tz=timezone.utc)
+    except (ValueError, OSError, OverflowError):
+        pass
+
+    logger.warning(
+        "[NEWS-CAL] could not parse event time %r — event will be excluded "
+        "from blackout evaluation",
+        time_str,
+    )
+    return None
 
 
 def is_blackout(

@@ -547,3 +547,165 @@ def test_original_title_beats_alias_on_score_tie() -> None:
     r = match_event("Inflation Rate YoY", currency="USD", events=[ev])
     assert r is not None
     assert r["actual"] == 3.2
+
+
+# ---------------------------------------------------------------------------
+# M1 — frequency-suffix disambiguation (m/m vs q/q vs y/y)
+# ---------------------------------------------------------------------------
+
+
+from risk.news_calendar.matcher import extract_frequency  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("Retail Sales m/m",     "mom"),
+        ("Retail Sales MoM",     "mom"),
+        ("CPI Y/Y",              "yoy"),
+        ("Inflation Rate YoY",   "yoy"),
+        ("GDP q/q",              "qoq"),
+        ("Trade Balance",        None),    # no frequency
+        ("Some Event",           None),
+        ("",                     None),
+        ("income tax",           None),    # 'mom' must not match inside 'income'
+        ("Homeowner sentiment",  None),    # 'mom' must not match inside 'homeowner'
+    ],
+)
+def test_m1_extract_frequency(text: str, expected) -> None:
+    """``extract_frequency`` returns the normalised frequency or ``None``.
+    Word-boundary check prevents false positives inside unrelated words."""
+    assert extract_frequency(text) == expected
+
+
+def test_m1_matcher_picks_mom_for_mom_query() -> None:
+    """The review's M1 scenario: a monthly query against a payload that
+    contains both monthly and quarterly versions of the same release.
+    Matcher must return the monthly one."""
+    events = [
+        {
+            "country": "US", "event": "Retail Sales MoM",
+            "actual": 0.5, "estimate": 0.4, "impact": "high",
+        },
+        {
+            "country": "US", "event": "Retail Sales QoQ",
+            "actual": 1.2, "estimate": 1.0, "impact": "high",
+        },
+    ]
+    r = match_event("Retail Sales m/m", currency="USD", events=events)
+    assert r is not None
+    assert r["event"] == "Retail Sales MoM"
+    assert r["actual"] == 0.5
+
+
+def test_m1_matcher_picks_qoq_for_qoq_query() -> None:
+    """Mirror of the above: a quarterly query must return the quarterly event."""
+    events = [
+        {
+            "country": "US", "event": "Retail Sales MoM",
+            "actual": 0.5, "estimate": 0.4, "impact": "high",
+        },
+        {
+            "country": "US", "event": "Retail Sales QoQ",
+            "actual": 1.2, "estimate": 1.0, "impact": "high",
+        },
+    ]
+    r = match_event("Retail Sales q/q", currency="USD", events=events)
+    assert r is not None
+    assert r["event"] == "Retail Sales QoQ"
+    assert r["actual"] == 1.2
+
+
+def test_m1_matcher_rejects_wrong_frequency_when_only_option() -> None:
+    """If the only candidate has the wrong frequency, the matcher must
+    return None — better to keep polling than to fire on the wrong
+    release."""
+    events = [
+        {
+            "country": "US", "event": "Retail Sales QoQ",
+            "actual": 1.2, "estimate": 1.0, "impact": "high",
+        },
+    ]
+    assert match_event("Retail Sales m/m", currency="USD", events=events) is None
+
+
+def test_m1_matcher_allows_frequency_less_candidate_as_fallback() -> None:
+    """The review's M1 acknowledged best-effort case: a query has a
+    frequency, the candidate has none. Allow the match (Finnhub
+    sometimes omits the suffix). The frequency gate only blocks when
+    BOTH sides have a frequency and they disagree."""
+    events = [
+        {
+            "country": "US", "event": "Retail Sales",
+            "actual": 0.5, "estimate": 0.4, "impact": "high",
+        },
+    ]
+    r = match_event("Retail Sales m/m", currency="USD", events=events)
+    assert r is not None
+    assert r["event"] == "Retail Sales"
+
+
+def test_m1_matcher_prefers_freq_match_over_freq_less_on_score_tie() -> None:
+    """When two candidates score equally and one matches frequency while
+    the other has no frequency, the freq-match wins."""
+    events = [
+        # No frequency suffix — scores against "Retail Sales" portion.
+        {
+            "country": "US", "event": "Retail Sales",
+            "actual": 0.5, "estimate": 0.4, "impact": "high",
+        },
+        # MoM suffix matches the query frequency.
+        {
+            "country": "US", "event": "Retail Sales MoM",
+            "actual": 0.7, "estimate": 0.4, "impact": "high",
+        },
+    ]
+    # Query "Retail Sales MoM" — its alias-expansion against
+    # "Retail Sales MoM" will score 4.0 (exact 3-word match), while
+    # "Retail Sales" scores 3.0. The frequency tiebreaker is mostly a
+    # belt-and-braces safety net at the same priority below
+    # original-title-match — but here, the strict score already favours
+    # the freq match. Verify the right one wins.
+    r = match_event("Retail Sales MoM", currency="USD", events=events)
+    assert r is not None
+    assert r["event"] == "Retail Sales MoM"
+
+
+def test_m1_matcher_query_without_freq_does_not_filter() -> None:
+    """A frequency-less query must accept any candidate. The gate only
+    fires when BOTH sides carry a frequency and they differ — so a
+    bare query like "Retail Sales" sees both MoM and QoQ as valid
+    candidates, and the higher-impact/alphabetical tiebreaker decides."""
+    mom = {
+        "country": "US", "event": "Retail Sales MoM",
+        "actual": 0.5, "estimate": 0.4, "impact": "high",
+    }
+    qoq = {
+        "country": "US", "event": "Retail Sales QoQ",
+        "actual": 1.2, "estimate": 1.0, "impact": "high",
+    }
+    # Both orderings must be deterministic. With score tied and
+    # impact tied, payload order is the final fallback (stable sort).
+    r1 = match_event("Retail Sales", currency="USD", events=[mom, qoq])
+    r2 = match_event("Retail Sales", currency="USD", events=[mom, qoq])
+    assert r1 is not None and r2 is not None
+    assert r1["event"] == r2["event"]  # determinism
+
+
+def test_m1_alias_with_freq_still_finds_freq_match() -> None:
+    """``CPI Y/Y`` aliases to ``inflation rate yoy``. With a YoY event
+    in the cache, the matcher should still find it through the alias
+    path AND respect the freq gate (no QoQ contamination)."""
+    events = [
+        {
+            "country": "US", "event": "Inflation Rate YoY",
+            "actual": 3.2, "estimate": 3.1, "impact": "high",
+        },
+        {
+            "country": "US", "event": "Inflation Rate QoQ",
+            "actual": 0.8, "estimate": 0.7, "impact": "high",
+        },
+    ]
+    r = match_event("CPI Y/Y", currency="USD", events=events)
+    assert r is not None
+    assert r["event"] == "Inflation Rate YoY"

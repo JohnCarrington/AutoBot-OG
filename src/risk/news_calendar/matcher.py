@@ -168,6 +168,49 @@ def normalize(text: str) -> set[str]:
     return set(cleaned.split())
 
 
+# ---------------------------------------------------------------------------
+# Frequency-suffix detection (review M1)
+#
+# Many releases publish in multiple reporting frequencies — "Retail Sales
+# MoM" and "Retail Sales QoQ" are distinct releases with different
+# scheduled times. The legacy fuzzy_score is blind to the suffix, so a
+# monthly request could match a quarterly candidate when scores tied.
+#
+# This is regex-based rather than token-based because Finnhub event
+# names embed the suffix either as a separate token ("Retail Sales MoM")
+# or fused ("CPI YoY"), and request titles use the slashed forms
+# ("CPI Y/Y", "Retail Sales m/m"). Both must normalise to the same key.
+# ---------------------------------------------------------------------------
+_FREQUENCY_NORMALISE: tuple[tuple[re.Pattern[str], str], ...] = (
+    # Slashed forms (request-side): m/m, q/q, y/y. Anywhere in string.
+    (re.compile(r"m/m", re.IGNORECASE), "mom"),
+    (re.compile(r"q/q", re.IGNORECASE), "qoq"),
+    (re.compile(r"y/y", re.IGNORECASE), "yoy"),
+    # Bare tokens with word boundaries so "mom" does not match inside
+    # words like "income" or "homeowner".
+    (re.compile(r"\bmom\b", re.IGNORECASE), "mom"),
+    (re.compile(r"\bqoq\b", re.IGNORECASE), "qoq"),
+    (re.compile(r"\byoy\b", re.IGNORECASE), "yoy"),
+)
+
+
+def extract_frequency(text: str) -> Optional[str]:
+    """Return normalised reporting frequency (``"mom"`` / ``"qoq"`` /
+    ``"yoy"``) if the text contains one of the recognised suffixes,
+    otherwise ``None``.
+
+    Detection is case-insensitive and tolerates either the slashed form
+    (``"m/m"``) or the bare token form (``"MoM"``). Bare tokens use word
+    boundaries so they don't false-positive inside unrelated words.
+    """
+    if not text:
+        return None
+    for pattern, normalised in _FREQUENCY_NORMALISE:
+        if pattern.search(text):
+            return normalised
+    return None
+
+
 def fuzzy_score(title_words: set[str], candidate: str) -> float:
     """Score how well a candidate event-name matches the request.
 
@@ -203,11 +246,19 @@ def match_event(
     Country gate applies BEFORE scoring — wrong-country events cannot
     compete for ``best_score``. This is the 2026-04-23 regression fix.
 
+    Frequency gate (review M1): when both the request title AND the
+    candidate event carry a reporting-frequency suffix (``m/m``, ``q/q``,
+    ``y/y`` or their bare forms), and the two frequencies differ, the
+    candidate is dropped — different reporting frequencies are different
+    releases. When either side is missing a frequency the gate doesn't
+    fire, so a frequency-less candidate can still match (best-effort).
+
     Tiebreaker (review H3 — deterministic across payload orderings):
     when two candidates score equally, prefer in order:
       1. matched against the original title (not via an alias);
-      2. higher impact (HIGH > MEDIUM > LOW);
-      3. alphabetically earlier country code.
+      2. frequency match (query and candidate frequencies agree);
+      3. higher impact (HIGH > MEDIUM > LOW);
+      4. alphabetically earlier country code.
 
     Returns ``None`` when:
     - ``event_title`` is empty;
@@ -228,10 +279,13 @@ def match_event(
     if not events:
         return None
 
+    query_freq = extract_frequency(event_title)
+
     # Collect every candidate that scores > 0. Score per (alias_title, event)
     # pair; same event can appear multiple times across alias iterations —
     # the sort below picks the best entry overall.
-    candidates: list[tuple[float, bool, dict[str, Any]]] = []
+    # Tuple shape: (score, is_original, freq_matches, event)
+    candidates: list[tuple[float, bool, bool, dict[str, Any]]] = []
     titles = expand_title(event_title)
     for try_index, try_title in enumerate(titles):
         title_words = normalize(try_title)
@@ -239,26 +293,46 @@ def match_event(
         for ev in events:
             if ev.get("country") not in allowed:
                 continue
-            if is_blocked_match(event_title, ev.get("event", "")):
+            cand_event_name = ev.get("event", "")
+            if is_blocked_match(event_title, cand_event_name):
                 continue
-            score = fuzzy_score(title_words, ev.get("event", ""))
+            # Frequency gate: both sides have a frequency and they differ
+            # → different release; skip entirely.
+            cand_freq = extract_frequency(cand_event_name)
+            if (
+                query_freq is not None
+                and cand_freq is not None
+                and query_freq != cand_freq
+            ):
+                continue
+            score = fuzzy_score(title_words, cand_event_name)
             if score > 0:
-                candidates.append((score, is_original, ev))
+                # ``freq_matches`` is True when the candidate's frequency
+                # is the same as the query's, OR when the query has no
+                # frequency at all (in which case there's nothing to
+                # match against, so we don't penalise).
+                freq_matches = (
+                    query_freq is None or cand_freq == query_freq
+                )
+                candidates.append((score, is_original, freq_matches, ev))
 
     if not candidates:
         return None
 
-    def _sort_key(c: tuple[float, bool, dict[str, Any]]) -> tuple[float, int, int, str]:
-        score, is_original, ev = c
+    def _sort_key(
+        c: tuple[float, bool, bool, dict[str, Any]],
+    ) -> tuple[float, int, int, int, str]:
+        score, is_original, freq_matches, ev = c
         return (
-            -score,                                    # higher score first
-            0 if is_original else 1,                   # original-title match first
-            -_IMPACT_RANK[parse_impact(ev.get("impact"))],  # higher impact first
-            str(ev.get("country") or "ZZ"),            # alphabetical (asc)
+            -score,                                          # higher score first
+            0 if is_original else 1,                         # original-title first
+            0 if freq_matches else 1,                        # freq-match preferred
+            -_IMPACT_RANK[parse_impact(ev.get("impact"))],   # higher impact first
+            str(ev.get("country") or "ZZ"),                  # alphabetical (asc)
         )
 
     candidates.sort(key=_sort_key)
-    best = candidates[0][2]
+    best = candidates[0][3]
 
     if best.get("actual") is None:
         return None
@@ -271,5 +345,6 @@ __all__ = [
     "expand_title",
     "normalize",
     "fuzzy_score",
+    "extract_frequency",
     "match_event",
 ]
