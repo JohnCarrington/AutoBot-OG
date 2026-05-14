@@ -21,13 +21,19 @@ blackout, which is the safe default (``docs/v1_architecture.md`` §6.6).
 """
 
 from .calendar import (
+    CACHE_STALENESS_THRESHOLD_SECS,
     POLL_INTERVAL,
+    BlackoutResult,
+    cache_staleness_seconds,
     get_actual_for_event,
+    is_blackout,
     poll_for_actual,
 )
 from .impact import (
     DEVIATION_THRESHOLD,
     Impact,
+    classify_beat_miss,
+    classify_direction,
     compute_deviation,
     compute_surprise,
     parse_impact,
@@ -38,11 +44,17 @@ __all__ = [
     # Public API
     "get_actual_for_event",
     "poll_for_actual",
+    "is_blackout",
+    "BlackoutResult",
     "Impact",
     "parse_impact",
     # Knobs / helpers exposed for the risk layer and tests
     "POLL_INTERVAL",
+    "CACHE_STALENESS_THRESHOLD_SECS",
     "DEVIATION_THRESHOLD",
+    "cache_staleness_seconds",
+    "classify_beat_miss",
+    "classify_direction",
     "compute_deviation",
     "compute_surprise",
 ]

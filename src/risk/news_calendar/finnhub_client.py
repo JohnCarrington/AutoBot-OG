@@ -9,6 +9,21 @@ The legacy AutoBot fetcher kept only ``impact == "high"``. This client
 widens the filter to keep MEDIUM events too, because v1's risk layer
 applies a *soft* block to medium-impact releases (skip new entries;
 existing trades unchanged) and therefore needs them in the cache.
+
+Authentication
+--------------
+The API token is sent via the ``X-Finnhub-Token`` request header rather
+than as a URL query parameter. ``requests`` exception strings include
+the failing URL verbatim — putting the token in the query string would
+leak it into application logs on any network blip (review H1).
+
+Failure semantics
+-----------------
+``fetch_calendar`` returns ``None`` on any failure (network, HTTP
+non-200, JSON decode, Finnhub disabled). It returns ``list[dict]``
+(possibly empty) only on confirmed success. Callers in ``calendar.py``
+use this distinction to preserve the previous good cache on transient
+failures rather than overwriting it with empty data (review H4).
 """
 
 from __future__ import annotations
@@ -16,6 +31,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import requests
 
@@ -63,40 +79,55 @@ TRADED_COUNTRIES: frozenset[str] = frozenset(
 )
 
 
-def fetch_calendar() -> list[dict]:
+def fetch_calendar() -> Optional[list[dict]]:
     """Fetch today + tomorrow from Finnhub's ``/calendar/economic`` endpoint.
 
     Returns raw event dicts filtered to:
     - ``country in TRADED_COUNTRIES``
     - ``impact != Impact.LOW``
 
-    Returns ``[]`` on any error or when ``FINNHUB_ENABLED`` is False.
+    Failure handling (review H4): returns ``None`` on any error or when
+    ``FINNHUB_ENABLED`` is False. Returns ``list[dict]`` (possibly empty)
+    only on confirmed success. The empty-list case is "fetch worked, no
+    matching events in the window"; the ``None`` case is "we don't know
+    what the calendar contains right now". ``calendar.poll_for_actual``
+    uses the distinction to preserve the previous good cache on
+    transient failures.
+
     Never raises — callers can poll on a schedule without try/except.
+
+    Authentication (review H1): the API token is sent via the
+    ``X-Finnhub-Token`` header to keep it out of ``requests`` exception
+    strings (which include the failing URL).
     """
     if not FINNHUB_ENABLED:
-        return []
+        return None
 
     try:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         tomorrow = (datetime.now(timezone.utc) + timedelta(days=1)).strftime("%Y-%m-%d")
         url = (
             f"{FINNHUB_BASE_URL}/calendar/economic"
-            f"?from={today}&to={tomorrow}&token={FINNHUB_API_KEY}"
+            f"?from={today}&to={tomorrow}"
         )
-        resp = requests.get(url, timeout=FETCH_TIMEOUT)
+        resp = requests.get(
+            url,
+            headers={"X-Finnhub-Token": FINNHUB_API_KEY},
+            timeout=FETCH_TIMEOUT,
+        )
     except Exception as e:
         logger.warning("[NEWS-CAL] Finnhub fetch failed: %s", e)
-        return []
+        return None
 
     if resp.status_code != 200:
         logger.warning("[NEWS-CAL] Finnhub returned %d", resp.status_code)
-        return []
+        return None
 
     try:
         data = resp.json()
     except Exception as e:
         logger.warning("[NEWS-CAL] Finnhub JSON decode failed: %s", e)
-        return []
+        return None
 
     events = data.get("economicCalendar", []) or []
 

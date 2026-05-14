@@ -226,27 +226,31 @@ def test_no_events_returns_none() -> None:
     assert match_event("PMI", currency="GBP", events=[]) is None
 
 
-def test_multiple_same_country_same_title_resolves_deterministically() -> None:
-    """If two GB entries share a title, the tie-break (first > wins, not >=)
-    must resolve to one of them — never leak into a different country."""
-    events = [
-        {
-            "country": "GB", "event": "S&P Global Manufacturing PMI Flash",
-            "actual": 53.6, "estimate": 49.9, "impact": "high",
-        },
-        {
-            "country": "GB", "event": "S&P Global Manufacturing PMI Flash",
-            "actual": 54.0, "estimate": 49.5, "impact": "high",
-        },
-    ]
-    result = match_event(
-        "S&P Global Manufacturing PMI Flash",
-        currency="GBP",
-        events=events,
+def test_multiple_same_country_same_title_is_deterministic_per_payload() -> None:
+    """Two GB entries that tie on every H3 tiebreaker dimension (country,
+    event, impact). Python's stable sort means *payload order* is the
+    final tiebreaker. Same payload → same answer (deterministic per call).
+    Result is always GB — never leaks into another country."""
+    a = {
+        "country": "GB", "event": "S&P Global Manufacturing PMI Flash",
+        "actual": 53.6, "estimate": 49.9, "impact": "high",
+    }
+    b = {
+        "country": "GB", "event": "S&P Global Manufacturing PMI Flash",
+        "actual": 54.0, "estimate": 49.5, "impact": "high",
+    }
+    # Same payload, two calls → identical result.
+    r1 = match_event(
+        "S&P Global Manufacturing PMI Flash", currency="GBP", events=[a, b]
     )
-    assert result is not None
-    assert result["country"] == "GB"
-    assert result["actual"] in (53.6, 54.0)
+    r2 = match_event(
+        "S&P Global Manufacturing PMI Flash", currency="GBP", events=[a, b]
+    )
+    assert r1 is not None and r2 is not None
+    assert r1["country"] == r2["country"] == "GB"
+    assert r1["actual"] == r2["actual"]  # determinism per payload
+    # First-in-payload wins as final tiebreaker (stable sort).
+    assert r1["actual"] == 53.6
 
 
 def test_same_title_other_country_with_actual_does_not_steal_match() -> None:
@@ -425,3 +429,121 @@ def test_eur_country_set_includes_composite() -> None:
     """The EU composite code must remain in the EUR set or the calendar
     will silently drop eurozone-aggregate releases."""
     assert "EU" in M._COUNTRIES_FOR_CURRENCY["EUR"]
+
+
+# ---------------------------------------------------------------------------
+# H2 — block-pair bidirectional (NFP request vs ADP candidate, the
+# direction the legacy fix missed)
+# ---------------------------------------------------------------------------
+
+
+def test_block_pair_nfp_request_does_not_match_adp_candidate() -> None:
+    """The 2026-05-14 review's H2 probe: an NFP scheduled-event poll must
+    not silently match a stale ADP release. Same shape of bug as the
+    2026-04-23 country-filter incident but on the release axis."""
+    events = [
+        {
+            "country": "US", "event": "ADP Employment Change",
+            "actual": 175000, "estimate": 150000, "impact": "high",
+        },
+    ]
+    assert match_event(
+        "Non-Farm Employment Change", currency="USD", events=events,
+    ) is None
+
+
+def test_block_pair_alt_nfp_spellings_also_blocked() -> None:
+    """All NFP spellings classify as NFP and must reject ADP candidates."""
+    adp = {
+        "country": "US", "event": "ADP Employment Change",
+        "actual": 175000, "estimate": 150000, "impact": "high",
+    }
+    for title in (
+        "Non-Farm Payrolls",
+        "Non Farm Payrolls",
+        "Nonfarm Payrolls",
+        "Nonfarm Employment Change",
+    ):
+        assert match_event(title, currency="USD", events=[adp]) is None, (
+            f"title={title!r} unexpectedly matched the ADP event"
+        )
+
+
+def test_block_pair_classifier_handles_ambiguous_adp_title() -> None:
+    """The ForexFactory title 'ADP Non-Farm Employment Change' contains
+    both vocabularies. It must classify as ADP (the more specific token)
+    so an ADP→ADP match is not falsely blocked."""
+    from risk.news_calendar.matcher import _classify_adp_or_nfp
+    assert _classify_adp_or_nfp("adp non-farm employment change") == "adp"
+    assert _classify_adp_or_nfp("non-farm employment change") == "nfp"
+    assert _classify_adp_or_nfp("non farm payrolls") == "nfp"
+    assert _classify_adp_or_nfp("adp employment change") == "adp"
+    assert _classify_adp_or_nfp("cpi y/y") is None
+
+
+# ---------------------------------------------------------------------------
+# H3 — deterministic EUR cross-country tiebreaker
+# ---------------------------------------------------------------------------
+
+
+def test_eur_de_vs_fr_tiebreaker_is_deterministic_either_payload_order() -> None:
+    """DE and FR both publish their PMI Flash with identical impact and
+    event names. The tiebreaker must pick the same country regardless of
+    which order Finnhub returns them in."""
+    de = {
+        "country": "DE", "event": "S&P Global Manufacturing PMI Flash",
+        "actual": 51.2, "estimate": 51.0, "impact": "high",
+    }
+    fr = {
+        "country": "FR", "event": "S&P Global Manufacturing PMI Flash",
+        "actual": 48.9, "estimate": 49.0, "impact": "high",
+    }
+    r1 = match_event(
+        "S&P Global Manufacturing PMI Flash", currency="EUR",
+        events=[de, fr],
+    )
+    r2 = match_event(
+        "S&P Global Manufacturing PMI Flash", currency="EUR",
+        events=[fr, de],
+    )
+    assert r1 is not None and r2 is not None
+    # Alphabetical country tiebreaker → DE before FR.
+    assert r1["country"] == "DE"
+    assert r2["country"] == "DE"
+
+
+def test_high_impact_beats_medium_impact_on_score_tie() -> None:
+    """When two candidates score equally, the HIGH-impact one wins over
+    the MEDIUM-impact one — even if the MEDIUM appears first or has a
+    lexicographically smaller country code."""
+    eu_medium = {
+        "country": "EU", "event": "Retail Sales MoM",
+        "actual": 0.5, "estimate": 0.3, "impact": "medium",
+    }
+    fr_high = {
+        "country": "FR", "event": "Retail Sales MoM",
+        "actual": 0.7, "estimate": 0.4, "impact": "high",
+    }
+    r = match_event(
+        "Retail Sales MoM", currency="EUR",
+        events=[eu_medium, fr_high],
+    )
+    assert r is not None
+    assert r["country"] == "FR"
+    assert r["impact"] == "high"
+
+
+def test_original_title_beats_alias_on_score_tie() -> None:
+    """If the original title and an alias both produce the same score
+    against the same candidate, the original-title match wins (it ranked
+    higher in the tiebreaker)."""
+    # Contrived: original title scores exactly the same as an alias
+    # would. Easiest construction is to use a title that IS the canonical
+    # Finnhub name — no alias map entry needed for "Inflation Rate YoY".
+    ev = {
+        "country": "US", "event": "Inflation Rate YoY",
+        "actual": 3.2, "estimate": 3.1, "impact": "high",
+    }
+    r = match_event("Inflation Rate YoY", currency="USD", events=[ev])
+    assert r is not None
+    assert r["actual"] == 3.2

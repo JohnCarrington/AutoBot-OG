@@ -59,6 +59,29 @@ def parse_impact(impact_str: str | None) -> Impact:
     return Impact.LOW
 
 
+def classify_beat_miss(deviation: float) -> str:
+    """Threshold-gated BEAT/MISS/IN_LINE label for a fractional deviation.
+
+    Single source of truth for the ``beat_miss`` taxonomy (review H5).
+    Used by both ``compute_deviation`` and ``calendar.get_actual_for_event``'s
+    Finnhub-surprise branch, so the same input always produces the same
+    label regardless of which deviation source the result was derived from.
+
+    A surprise larger than ``+DEVIATION_THRESHOLD`` is BEAT; smaller than
+    ``-DEVIATION_THRESHOLD`` is MISS; everything between is IN_LINE.
+    """
+    if deviation > DEVIATION_THRESHOLD:
+        return "BEAT"
+    if deviation < -DEVIATION_THRESHOLD:
+        return "MISS"
+    return "IN_LINE"
+
+
+def classify_direction(deviation: float) -> str:
+    """Threshold-gated CONTINUATION/REVERSAL hint for a fractional deviation."""
+    return "CONTINUATION" if abs(deviation) > DEVIATION_THRESHOLD else "REVERSAL"
+
+
 def compute_deviation(actual: float, forecast: float) -> dict[str, Any]:
     """BEAT/MISS/IN_LINE classification with CONTINUATION/REVERSAL hint.
 
@@ -71,22 +94,10 @@ def compute_deviation(actual: float, forecast: float) -> dict[str, Any]:
     if forecast == 0:
         return {"deviation": None, "direction_hint": None, "beat_miss": None}
     deviation = (actual - forecast) / abs(forecast)
-    if deviation > DEVIATION_THRESHOLD:
-        return {
-            "deviation": deviation,
-            "direction_hint": "CONTINUATION",
-            "beat_miss": "BEAT",
-        }
-    if deviation < -DEVIATION_THRESHOLD:
-        return {
-            "deviation": deviation,
-            "direction_hint": "CONTINUATION",
-            "beat_miss": "MISS",
-        }
     return {
         "deviation": deviation,
-        "direction_hint": "REVERSAL",
-        "beat_miss": "IN_LINE",
+        "direction_hint": classify_direction(deviation),
+        "beat_miss": classify_beat_miss(deviation),
     }
 
 
@@ -123,6 +134,8 @@ __all__ = [
     "DEVIATION_THRESHOLD",
     "Impact",
     "parse_impact",
+    "classify_beat_miss",
+    "classify_direction",
     "compute_deviation",
     "compute_surprise",
 ]

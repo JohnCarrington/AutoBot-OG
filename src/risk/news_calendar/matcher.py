@@ -33,8 +33,18 @@ import logging
 import re
 from typing import Any, Optional
 
+from .impact import Impact, parse_impact
+
 
 logger = logging.getLogger(__name__)
+
+
+# Tiebreaker ranks for impact severity (review H3). Higher = preferred.
+_IMPACT_RANK: dict[Impact, int] = {
+    Impact.HIGH: 2,
+    Impact.MEDIUM: 1,
+    Impact.LOW: 0,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -92,23 +102,57 @@ _FF_TO_FINNHUB: dict[str, list[str]] = {
 }
 
 
-# Pairs of (request-word, candidate-event-substring) that must NOT match
-# despite token overlap. ADP and Non-Farm Payrolls share 60% of their
-# tokens but are entirely different releases.
-_BLOCK_PAIRS: set[tuple[str, str]] = {
-    ("adp", "non farm payrolls"),
-    ("adp", "nonfarm payrolls"),
-}
+# ---------------------------------------------------------------------------
+# Block-pair classifier (review H2 fix — bidirectional).
+#
+# ADP Employment Change and Non-Farm Payrolls share "employment"/"change"
+# vocabulary but are different US labor releases that publish ~2 days
+# apart. The legacy ``_BLOCK_PAIRS = {("adp", "non farm payrolls"), ...}``
+# only blocked the ADP→NFP direction (request mentions "adp" AND candidate
+# mentions "non farm payrolls"). The reverse (request title "Non-Farm
+# Employment Change", candidate "ADP Employment Change") fell through —
+# same shape of bug as the 2026-04-23 country incident.
+#
+# A literal symmetric set-of-tuples (the review's suggested fix) does
+# NOT actually catch the reverse case either, because the request title
+# in that direction ("Non-Farm Employment Change") contains no
+# "payrolls" substring. So instead we classify each side independently
+# into one of {"adp", "nfp", None} and block when the two sides land in
+# DIFFERENT groups (in either direction).
+# ---------------------------------------------------------------------------
+_NFP_TOKENS: frozenset[str] = frozenset(
+    {"non farm", "non-farm", "nonfarm", "payrolls"}
+)
+
+
+def _classify_adp_or_nfp(text_lower: str) -> Optional[str]:
+    """Return ``"adp"``, ``"nfp"``, or ``None``.
+
+    ``"adp"`` wins precedence — the ForexFactory request title for the
+    ADP release is ``"ADP Non-Farm Employment Change"``, which contains
+    BOTH vocabularies. Classifying it as ADP (the more specific token)
+    is what stops ADP↔ADP matches from being blocked while still
+    catching ADP↔NFP cross-matches.
+    """
+    if "adp" in text_lower:
+        return "adp"
+    if any(tok in text_lower for tok in _NFP_TOKENS):
+        return "nfp"
+    return None
 
 
 def is_blocked_match(event_title: str, candidate_event: str) -> bool:
-    """Return True if matching this candidate would be a known false-positive."""
-    t_lower = event_title.lower()
-    c_lower = candidate_event.lower()
-    for block_word, block_event in _BLOCK_PAIRS:
-        if block_word in t_lower and block_event in c_lower:
-            return True
-    return False
+    """Return True if matching this candidate would be a known false-positive.
+
+    Currently blocks ADP↔NFP cross-matches in either direction:
+    - ADP request vs NFP candidate (the legacy case);
+    - NFP request vs ADP candidate (review H2 — newly fixed).
+    """
+    t = _classify_adp_or_nfp(event_title.lower())
+    c = _classify_adp_or_nfp(candidate_event.lower())
+    if t is None or c is None:
+        return False
+    return t != c
 
 
 def expand_title(event_title: str) -> list[str]:
@@ -159,6 +203,12 @@ def match_event(
     Country gate applies BEFORE scoring — wrong-country events cannot
     compete for ``best_score``. This is the 2026-04-23 regression fix.
 
+    Tiebreaker (review H3 — deterministic across payload orderings):
+    when two candidates score equally, prefer in order:
+      1. matched against the original title (not via an alias);
+      2. higher impact (HIGH > MEDIUM > LOW);
+      3. alphabetically earlier country code.
+
     Returns ``None`` when:
     - ``event_title`` is empty;
     - ``currency`` is missing or unrecognised;
@@ -178,22 +228,38 @@ def match_event(
     if not events:
         return None
 
-    best: Optional[dict[str, Any]] = None
-    best_score = 0.0
-    for try_title in expand_title(event_title):
+    # Collect every candidate that scores > 0. Score per (alias_title, event)
+    # pair; same event can appear multiple times across alias iterations —
+    # the sort below picks the best entry overall.
+    candidates: list[tuple[float, bool, dict[str, Any]]] = []
+    titles = expand_title(event_title)
+    for try_index, try_title in enumerate(titles):
         title_words = normalize(try_title)
+        is_original = try_index == 0
         for ev in events:
             if ev.get("country") not in allowed:
                 continue
             if is_blocked_match(event_title, ev.get("event", "")):
                 continue
             score = fuzzy_score(title_words, ev.get("event", ""))
-            if score > best_score:
-                best_score = score
-                best = ev
+            if score > 0:
+                candidates.append((score, is_original, ev))
 
-    if best is None or best_score <= 0:
+    if not candidates:
         return None
+
+    def _sort_key(c: tuple[float, bool, dict[str, Any]]) -> tuple[float, int, int, str]:
+        score, is_original, ev = c
+        return (
+            -score,                                    # higher score first
+            0 if is_original else 1,                   # original-title match first
+            -_IMPACT_RANK[parse_impact(ev.get("impact"))],  # higher impact first
+            str(ev.get("country") or "ZZ"),            # alphabetical (asc)
+        )
+
+    candidates.sort(key=_sort_key)
+    best = candidates[0][2]
+
     if best.get("actual") is None:
         return None
     return best
