@@ -34,7 +34,10 @@ they can be tuned without touching the algorithm.
 from __future__ import annotations
 
 import math
-from typing import Any, Optional
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import Any, Literal, Optional
 
 import pandas as pd
 
@@ -55,6 +58,54 @@ M5_CONFIRMATIONS_REQUIRED = 3
 # Number of consecutive non-VOLATILE H1 classifications required before the
 # engine will *leave* VOLATILE.
 VOLATILE_EXIT_QUIET_H1_BARS = 3
+
+# Bounded emission log: ~2000 events covers ~64 hours at H1+M5 cadence, which
+# is plenty for the risk layer's 60-minute lookback queries (Phase 4).
+EMISSION_LOG_MAXLEN = 2000
+
+
+@dataclass(frozen=True)
+class RegimeEmission:
+    """Snapshot of engine state recorded at each ``process_*_close`` call.
+
+    Captured at the *end* of the public method (i.e. *after* any state
+    mutation), so consumers see the engine's view of the world that takes
+    effect from this bar onward.
+
+    Fields
+    ------
+    timestamp : Any
+        The triggering bar's index (typically a ``pd.Timestamp``). Stored
+        verbatim so test fixtures with integer indices still produce
+        readable emissions; time-window filtering in
+        :py:meth:`RegimeEngine.get_recent_emissions` only matches entries
+        whose timestamp is a ``datetime``.
+    kind : "H1" or "M5"
+        Which public method produced this emission.
+    regime, direction, is_live, reason
+        Engine state values at the moment the emission was logged.
+    committed : bool
+        True iff ``current_regime`` *changed* during this event. Covers
+        both H1-driven commits (VOLATILE auto-commit on stage; matches_
+        current/pending transitions) and M5-driven commits (third
+        consecutive agreeing M5 close promoting pending → current). The
+        risk layer's regime-instability counter sums this flag across a
+        60-minute window.
+    was_m5_reset : bool
+        Only meaningful for ``kind == "M5"``. True iff the M5
+        confirmation counter went from ``>0`` to ``0`` on this close
+        (i.e. an agreeing-streak was broken by a disagreeing M5). The
+        risk layer counts these toward its instability trigger.
+    """
+
+    timestamp: Any
+    kind: Literal["H1", "M5"]
+    regime: RegimeLabel
+    direction: Optional[Direction]
+    is_live: bool
+    reason: str
+    committed: bool
+    was_m5_reset: bool
 
 
 class RegimeEngine:
@@ -81,6 +132,17 @@ class RegimeEngine:
         # observed while the committed regime is VOLATILE.
         self._volatile_quiet_count: int = 0
 
+        # Emission log (Phase 4): bounded deque of state snapshots, one per
+        # ``process_h1_close`` / ``process_m5_close`` call. Consumed by the
+        # risk layer via ``get_recent_emissions`` and
+        # ``regime_live_at_last_h1_close``.
+        self._emission_log: deque[RegimeEmission] = deque(
+            maxlen=EMISSION_LOG_MAXLEN
+        )
+        # Snapshot of ``is_live()`` captured at the most recent H1 close,
+        # used by the risk layer's regime-instability cooldown extension.
+        self._last_h1_is_live: bool = False
+
     # --- Public query API ----------------------------------------------------
 
     def is_live(self) -> bool:
@@ -102,6 +164,66 @@ class RegimeEngine:
         """Return a serialisable snapshot of the engine's current state."""
         return to_dict(self)
 
+    def get_recent_emissions(
+        self, window_minutes: int, now_utc: datetime
+    ) -> list[RegimeEmission]:
+        """Return logged emissions within ``window_minutes`` of ``now_utc``.
+
+        Filters the internal emission log by timestamp. Emissions whose
+        ``timestamp`` is not a ``datetime`` (test fixtures using integer
+        indices) are skipped — production callers always pass real
+        datetimes through ``apply_regime_to_candles``.
+
+        Used by the risk layer's circuit-breaker rule to count regime
+        commits and M5 resets in the trailing hour.
+
+        Parameters
+        ----------
+        window_minutes : int
+            Trailing window size in minutes (typically 60 for the v1
+            instability check). Must be ``>= 1``.
+        now_utc : datetime
+            "Now" for the query. Naive datetimes are accepted but the
+            caller is responsible for ensuring timezone consistency.
+
+        Returns
+        -------
+        list[RegimeEmission]
+            Chronologically ordered emissions (oldest first) whose
+            ``timestamp`` is a ``datetime`` and within window.
+        """
+        if window_minutes < 1:
+            raise ValueError(
+                f"window_minutes must be >= 1, got {window_minutes}"
+            )
+        cutoff = now_utc - timedelta(minutes=window_minutes)
+        out: list[RegimeEmission] = []
+        for emission in self._emission_log:
+            ts = emission.timestamp
+            if not isinstance(ts, datetime):
+                continue
+            # Compare using consistent tz-awareness: if cutoff is tz-aware
+            # and ts is naive (or vice-versa) the comparison would raise.
+            # Skip mismatched entries defensively rather than blowing up.
+            try:
+                in_window = ts >= cutoff
+            except TypeError:
+                continue
+            if in_window:
+                out.append(emission)
+        return out
+
+    def regime_live_at_last_h1_close(self) -> bool:
+        """Return ``is_live()`` captured at the most recent H1 close.
+
+        Used by the risk layer's regime-instability cooldown extension:
+        after the primary 1-hour cooldown elapses, entries remain blocked
+        until at least one H1 close has produced ``is_live=True``. The
+        property is set to ``False`` on construction; it becomes
+        meaningful after the first call to :py:meth:`process_h1_close`.
+        """
+        return self._last_h1_is_live
+
     # --- H1 event ------------------------------------------------------------
 
     def process_h1_close(
@@ -110,6 +232,38 @@ class RegimeEngine:
         prev_h1_row: Optional[pd.Series] = None,
     ) -> None:
         """Consume a single H1 close and update internal state.
+
+        Public wrapper that snapshots state, delegates to
+        :py:meth:`_process_h1_close_inner` for the actual classification
+        + state-machine work, then appends a :py:class:`RegimeEmission`
+        to the emission log so the risk layer can introspect transitions
+        and instability after the fact. Existing tests do not need to
+        know the log exists — it is purely additive state.
+        """
+        pre_regime = self.current_regime
+        timestamp = h1_row.name
+        self._process_h1_close_inner(h1_row, prev_h1_row)
+        committed = self.current_regime != pre_regime
+        self._emission_log.append(
+            RegimeEmission(
+                timestamp=timestamp,
+                kind="H1",
+                regime=self.current_regime,
+                direction=self.current_direction,
+                is_live=self.is_live(),
+                reason=self.reason,
+                committed=committed,
+                was_m5_reset=False,
+            )
+        )
+        self._last_h1_is_live = self.is_live()
+
+    def _process_h1_close_inner(
+        self,
+        h1_row: pd.Series,
+        prev_h1_row: Optional[pd.Series] = None,
+    ) -> None:
+        """Classify + apply the H1 state machine. See ``process_h1_close``.
 
         The branch order matters and is contractual:
 
@@ -272,7 +426,35 @@ class RegimeEngine:
     # --- M5 event ------------------------------------------------------------
 
     def process_m5_close(self, m5_row: pd.Series) -> None:
-        """Consume a single M5 close and advance the confirmation counter."""
+        """Consume a single M5 close and advance the confirmation counter.
+
+        Public wrapper that snapshots counter + regime, delegates to
+        :py:meth:`_process_m5_close_inner`, then appends a
+        :py:class:`RegimeEmission` capturing whether the counter just
+        reset (``was_m5_reset``) and whether the regime committed via
+        this close. Additive logging; the inner method is unchanged.
+        """
+        pre_count = self.m5_confirmation_count
+        pre_regime = self.current_regime
+        timestamp = m5_row.name
+        self._process_m5_close_inner(m5_row)
+        was_m5_reset = pre_count > 0 and self.m5_confirmation_count == 0
+        committed = self.current_regime != pre_regime
+        self._emission_log.append(
+            RegimeEmission(
+                timestamp=timestamp,
+                kind="M5",
+                regime=self.current_regime,
+                direction=self.current_direction,
+                is_live=self.is_live(),
+                reason=self.reason,
+                committed=committed,
+                was_m5_reset=was_m5_reset,
+            )
+        )
+
+    def _process_m5_close_inner(self, m5_row: pd.Series) -> None:
+        """Advance the M5 confirmation counter. See ``process_m5_close``."""
         if self.pending_regime is None:
             return  # nothing to validate
 

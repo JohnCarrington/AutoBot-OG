@@ -915,6 +915,117 @@ positions continue to be managed normally).
 - The instability counter is per-pair and decays linearly over the
   rolling window.
 
+### 6.10 Phase 4 module structure
+
+The risk layer ships as `src/risk/` with `RiskGuard` as the single
+public orchestrator. Two methods drive everything: `allow_entry` gates
+prospective trades through a five-rule pipeline; `positions_to_force_close`
+emits EOD close orders.
+
+```
+src/risk/
+├── guard.py                     # RiskGuard class (orchestrator)
+├── types.py                     # OpenPosition, AccountState, CandidateTrade,
+│                                # MarketSnapshot, RuleResult, RiskDecision,
+│                                # ForceCloseOrder
+├── constants.py                 # env-overridable tunables
+├── news_calendar/               # Phase 4-A: Finnhub-backed calendar
+├── rules/
+│   ├── spread_filter.py         # §6.7
+│   ├── position_caps.py         # §6.8
+│   ├── news_blackout.py         # §6.6
+│   ├── circuit_breakers.py      # §6.9 (DD + loss streak + instability)
+│   └── eod_enforcement.py       # §6.5 (pre-EOD suppression + close orders)
+└── state/
+    └── circuit_breaker_state.py # JSON-persisted state for §6.9
+```
+
+#### Pipeline order in `allow_entry`
+
+```
+circuit_breakers → position_caps → news_blackout → spread_filter
+                                                  → pre_eod_suppression
+```
+
+Each rule returns a `RuleResult{allow, rule, reason}`; the first
+rejection short-circuits. Ordering reasoning: cheapest-state-only
+first, live-market last. Circuit breakers gate on persisted state +
+emission queries (highest information density per check); position
+caps are an O(small n) capacity check; news blackout is a calendar
+lookup; spread filter is the only rule touching live spread; pre-EOD
+suppression is a time-of-day check whose result depends on candidate
+regime and weekday.
+
+#### Spec-ambiguity resolutions
+
+The locked Phase 4 decisions, captured here so future revisions can
+re-litigate them deliberately:
+
+- **"Profitable" for TREND overnight hold (§6.5)** — `current_pnl_r >= 1.0`
+  (i.e. position has reached +1R). Cleaner than depending on BE-amend
+  state which `OpenPosition` may not carry.
+- **Regime-instability counts (§6.9.3)** — trigger when EITHER
+  `commits > REGIME_INSTABILITY_COMMITS (=3)` OR
+  `m5_resets > REGIME_INSTABILITY_M5_RESETS (=5)` in the rolling
+  `REGIME_INSTABILITY_WINDOW_MIN (=60)` minutes.
+- **What counts as a "transition"** — commit events only
+  (`current_regime` changes during the bar). Cancelled pendings do not
+  count.
+- **What counts as an "M5 reset"** — `m5_confirmation_count` transitions
+  from `>0` to `0` (a disagreeing M5 closed against an in-flight
+  pending).
+- **Pause duration (§6.9.3)** — `max(1h, time-until-next-regime-live-H1-close)`.
+  Implemented as a primary 1-hour cooldown with an extension check on
+  every subsequent `allow_entry` that consults
+  `RegimeEngine.regime_live_at_last_h1_close()`.
+- **Pause scope** — per-pair. v1 single-pair collapses this to global,
+  but the state model carries `regime_instability_pair`.
+- **EOD time (§6.5)** — DST-aware. NY close at 17:00 in
+  `RISK_NY_TZ (=America/New_York)`. Converted to UTC at decision time
+  via `zoneinfo`: 21:00 UTC under EDT, 22:00 UTC under EST.
+- **News blackout (§6.6) at the `allow_entry` boundary** — HIGH and
+  MEDIUM impact events both reject new entries equally. The HIGH-only
+  prohibition on stop modifications lives in Phase 5's execution layer.
+- **Pre-EOD suppression** — 30 min before NY close, suppress new
+  entries for RANGE/VOLATILE always; suppress TREND only on Fridays
+  (TREND can hold overnight Mon-Thu).
+- **SL sizing** — out of scope for Phase 4. The execution layer
+  (Phase 5) computes `SL = max(MIN_SL_PIPS, multiplier × ATR_M5)` per
+  §6.1 and feeds the resulting stop into broker placement.
+
+#### Env-var overrides
+
+All thresholds in `risk/constants.py` are read once at import time from
+environment variables matching the constant name (e.g.
+`RISK_DAILY_DD_LIMIT_R`, `RISK_SPREAD_ABS_CAP_PIPS`). The pattern
+mirrors `config/pair_config.py::MIN_SL_PIPS`. Defaults match this
+section's locked spec. No YAML config in v1; v2 may add one once an
+ops layer exists.
+
+#### Persisted state
+
+`CircuitBreakerState` lives at `data/risk/circuit_breaker_state.json`
+(the `data/` tree is gitignored). The state object is loaded once at
+construction and persisted lazily — only when a rule marks it dirty.
+Corrupt JSON or unparseable datetime fields degrade to a fresh state
+(fail-open is the v1-spec-aligned default; the next trade outcome
+will repopulate the cooldown machinery).
+
+#### Engine integration
+
+The risk layer reads from `RegimeEngine` via three public methods:
+
+- `current_regime` and `current_direction` (attributes) for the EOD
+  "still TREND, same direction" check.
+- `get_recent_emissions(window_minutes, now_utc)` for instability
+  counting.
+- `regime_live_at_last_h1_close()` for the cooldown extension.
+
+The engine appends a `RegimeEmission` snapshot at the end of every
+`process_h1_close` / `process_m5_close` (bounded deque, `maxlen=2000`).
+The snapshot carries enough to drive both the commits-in-window and
+M5-resets-in-window scans without re-walking history.
+
 ---
 
 ## Section 7 — Architectural Decisions
