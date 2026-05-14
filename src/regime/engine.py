@@ -191,10 +191,14 @@ class RegimeEngine:
                 # Stay VOLATILE; refresh confidence/reason for the new bar.
                 self.current_confidence = naive_conf
                 self.reason = naive_reason
-                # Re-inherit direction if naive offered one (e.g. a new
-                # volatility-expansion bar inside a trending bias).
-                if naive_dir is not None:
-                    self.current_direction = naive_dir
+                # M3 fix: ``current_direction`` always reflects the
+                # current bar's naive emission, even when ``None``. The
+                # previous conditional preserved stale bias — e.g. a
+                # ``volatility_expansion`` bar (carries BULLISH) followed
+                # by a ``structure_conflict`` bar (carries None) used to
+                # leave ``current_direction = BULLISH`` for the rest of
+                # the VOLATILE state. Direction-less VOLATILE is valid.
+                self.current_direction = naive_dir
                 self.pending_regime = None
                 self.pending_direction = None
                 self.m5_confirmation_count = 0

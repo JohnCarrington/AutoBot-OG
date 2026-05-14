@@ -601,6 +601,40 @@ def test_range_hysteresis_breaks_for_trend_emergence() -> None:
     assert eng.pending_direction == Direction.BULLISH
 
 
+def test_m3_volatile_direction_clears_on_directionless_bar() -> None:
+    """M3 carry-forward: ``current_direction`` must update every VOLATILE bar.
+
+    Before this fix, the "stay VOLATILE" branch only refreshed
+    ``current_direction`` when ``naive_dir`` was non-None — meaning a
+    ``volatility_expansion`` bar (which carries the trend candidate's
+    direction) followed by a ``structure_conflict`` bar (which carries
+    ``None``) left ``current_direction`` claiming the prior bias for the
+    rest of the VOLATILE state. The fix drops the conditional so a
+    directionless VOLATILE bar properly clears the direction.
+    """
+    eng = RegimeEngine()
+
+    # H1 #1: HH+HL with a 33% bar-on-bar BB-width jump → classifier
+    # emits (VOLATILE, BULLISH, "volatility_expansion"). VOLATILE commits
+    # immediately, carrying BULLISH from the underlying TREND candidate.
+    prev = _h1(structural_pattern="HH+HL", slope=0.45, bb_width=1.5)
+    expansion = _h1(structural_pattern="HH+HL", slope=0.45, bb_width=2.0)
+    eng.process_h1_close(expansion, prev_h1_row=prev)
+    assert eng.current_regime == RegimeLabel.VOLATILE
+    assert eng.current_direction == Direction.BULLISH
+    assert eng.reason == "volatility_expansion"
+
+    # H1 #2: HH+LL structure conflict → classifier emits
+    # (VOLATILE, None, "structure_conflict"). The "stay VOLATILE" branch
+    # fires; current_direction MUST clear to None (M3 fix).
+    eng.process_h1_close(
+        _h1(structural_pattern="HH+LL", slope=0.45, bb_width=2.0)
+    )
+    assert eng.current_regime == RegimeLabel.VOLATILE
+    assert eng.current_direction is None
+    assert eng.reason == "structure_conflict"
+
+
 def test_m5_validates_rejects_transition() -> None:
     """H5: the M5 validator must refuse a pending=TRANSITION on principle.
 
