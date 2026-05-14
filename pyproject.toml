@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autobot-og"
+version = "0.0.0"
+description = "Systematic FX trading bot (v1, GBPUSD) — regime-gated multi-strategy."
+requires-python = ">=3.12"
+readme = "README.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
