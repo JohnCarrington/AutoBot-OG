@@ -859,6 +859,30 @@ re-litigate them deliberately:
 - **No price-magnitude pip inference** — `PIP_SIZE` is an explicit
   per-pair dict in `pair_config.py`. New pairs must be added there
   rather than detected from quote magnitude.
+- **Liquidity-sweep session gate uses the confirmation bar's
+  timestamp** — not the caller-supplied ``current_time``. In live
+  operation they are effectively equal; in backtests / replays
+  ``current_time`` is the wall-clock (often ``datetime.now()``) while
+  the bar timestamps are the historical period being replayed.
+  Anchoring the gate to the bar makes session filtering reproducible
+  across both modes (H1, review 2026-05-14).
+- **EMA Continuation pullback bar count** — v1 inspects only the
+  single ``df_m5.iloc[-3]`` bar as the pullback; the spec's "2–3
+  M5 bars" wording is satisfied via the structure check
+  (``recent_pattern in {HH, HL}`` for bullish) which requires
+  consistent retrace structure over the 10-bar lookback. A 3+ bar
+  retrace where the EMA touch happened earlier than ``iloc[-3]`` is
+  intentionally skipped — v2 may walk back N bars (M1, review
+  2026-05-14).
+- **BB Reclaim TP midline source** — anchored to ``pierce.bb_mid_20_2``,
+  not ``confirmation.bb_mid_20_2``. The midline drifts bar-to-bar;
+  using the pierce bar's midline keeps R-multiples stable relative
+  to the rejection thesis (M2, review 2026-05-14).
+- **Boundary inclusivity** — strict on bars that drive the
+  directional thesis (pierce ``<``, confirmation ``>``); inclusive on
+  bars that merely say "we are no longer outside the band"
+  (rejection ``<= close <=``). Mirror in SHORT setups (M5, review
+  2026-05-14).
 
 #### Env-var overrides
 

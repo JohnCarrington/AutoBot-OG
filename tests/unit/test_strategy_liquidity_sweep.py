@@ -207,6 +207,46 @@ def test_london_session_accepted() -> None:
     assert sig is not None
 
 
+def test_session_gate_uses_bar_timestamp_not_caller_time() -> None:
+    """H1 regression (review 2026-05-14): the session gate must read the
+    confirmation bar's timestamp, not ``current_time``.
+
+    In live operation the two are effectively equal (the caller polls
+    right after each M5 close). But a backtest replaying historical
+    bars typically threads ``datetime.now()`` for ``current_time`` while
+    the bar timestamps reflect the period being replayed — if the gate
+    used ``current_time``, an Asia-session setup replayed during a NY
+    wall-clock session would be incorrectly accepted (and vice versa).
+    Anchor the gate to the bar.
+    """
+    # Bars span an Asia-session window; caller's wall-clock is NY-session.
+    sig = detect_liquidity_sweep(
+        df_m5=_m5_long_clean(end=_ASIA_NOW),
+        df_h1=_h1(),
+        regime_state=_state(),
+        pair=_PAIR,
+        current_time=_NY_NOW,
+    )
+    assert sig is None
+
+
+def test_session_gate_accepts_when_bar_in_session_but_caller_off_session() -> None:
+    """Mirror of the bug: bar in NY session, caller in Asia → accept.
+
+    The bar timestamp is what gates the session check; the caller's
+    wall-clock has no bearing on whether the setup occurred within an
+    allowed session.
+    """
+    sig = detect_liquidity_sweep(
+        df_m5=_m5_long_clean(end=_NY_NOW),
+        df_h1=_h1(),
+        regime_state=_state(),
+        pair=_PAIR,
+        current_time=_ASIA_NOW,
+    )
+    assert sig is not None
+
+
 # --- Pattern gates ----------------------------------------------------------
 
 

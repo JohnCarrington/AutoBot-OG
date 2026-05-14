@@ -6,13 +6,34 @@ supplied DataFrame.
 
 Pattern (LONG; SHORT is the mirror)
 -----------------------------------
-1. **Pierce** — `df_m5.iloc[-3].close < bb_lower_20_2`.
-2. **Rejection** — `bb_lower_20_2 <= df_m5.iloc[-2].close <= bb_upper_20_2`.
+1. **Pierce** — `df_m5.iloc[-3].close < bb_lower_20_2` (strict).
+2. **Rejection** — `bb_lower_20_2 <= df_m5.iloc[-2].close <= bb_upper_20_2`
+   (**inclusive** both sides; see M5 note below).
 3. **Confirmation** — `df_m5.iloc[-1].close > df_m5.iloc[-2].close` AND
-   `df_m5.iloc[-1].close > bb_lower_20_2`.
+   `df_m5.iloc[-1].close > bb_lower_20_2` (**strict** both sides).
 
 Stop is anchored to the *pierce wick*; target is the BB midline at the
 pierce bar (the canonical reversion target for this setup).
+
+Spec interpretations (review 2026-05-14)
+----------------------------------------
+**M2 — TP midline anchored to the pierce bar.** The BB midline is a
+20-period SMA — it drifts bar to bar. v1 stores ``pierce.bb_mid_20_2``
+as the TP, *not* ``confirmation.bb_mid_20_2``. Rationale: the
+rejection thesis says "price extended beyond the band relative to
+*that* moment's mean, and is now mean-reverting back". The reference
+mean is the pierce bar's. Using the confirmation bar's midline would
+let the target drift toward the entry as the setup completes, which
+distorts R-multiples.
+
+**M5 — boundary inclusivity is asymmetric, by design.** The rejection
+test is inclusive (``<= close <=``) because a close that lands *on*
+the band qualifies as "back inside the band" — it is no longer
+outside. The pierce and confirmation tests are strict (``<`` and
+``>``) because a close exactly *at* the band on those bars is the
+borderline case that does **not** confirm the thesis. The convention:
+**strict on the bars that drive the directional thesis, inclusive on
+the bar that merely says "we are no longer outside the band"**.
 """
 from __future__ import annotations
 

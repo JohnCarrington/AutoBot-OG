@@ -48,20 +48,20 @@ _STRATEGY_NAME = "liquidity_sweep"
 
 def detect_liquidity_sweep(
     df_m5: pd.DataFrame,
-    df_h1: pd.DataFrame,
+    df_h1: pd.DataFrame,  # noqa: ARG001 — kept for dispatcher uniformity
     regime_state: RegimeState,
     pair: str,
-    current_time: datetime,
+    current_time: datetime,  # noqa: ARG001 — kept for dispatcher uniformity
 ) -> Optional[Signal]:
     """Return a Signal for a confirmed VOLATILE sweep-reversal, else ``None``.
 
-    ``df_h1`` is consulted only for the MACD confidence bump; the gate
-    logic is M5-driven.
+    ``current_time`` is accepted for dispatcher uniformity but **not**
+    used for session gating — the session check below reads the
+    confirmation bar's index timestamp so backtests stay reproducible
+    (H1, review 2026-05-14). ``df_h1`` is currently unused (no MACD
+    bump for VOLATILE in v1) and kept for the same uniformity reason.
     """
     if regime_state.get("current_regime") != RegimeLabel.VOLATILE.value:
-        return None
-    # Session gate: Asia rejected.
-    if not (london_session(current_time) or ny_session(current_time)):
         return None
 
     if len(df_m5) < 3:
@@ -73,6 +73,21 @@ def detect_liquidity_sweep(
         df_m5.iloc[-2],
         df_m5.iloc[-1],
     )
+
+    # Session gate: Asia rejected. The check uses the *confirmation bar's*
+    # timestamp, not ``current_time`` — in live operation the two are
+    # effectively equal (the caller polls right after each M5 close), but
+    # backtests and replays pass ``datetime.now()`` (or a fixed wall-clock
+    # value) for ``current_time`` while the bar timestamps reflect the
+    # historical period being replayed. Anchoring to the bar makes
+    # session gating reproducible across both modes (H1, review 2026-05-14).
+    confirmation_ts = confirmation.name
+    if not isinstance(confirmation_ts, datetime):
+        return None
+    if not (
+        london_session(confirmation_ts) or ny_session(confirmation_ts)
+    ):
+        return None
 
     setup = _try_long(
         sweep=sweep,
@@ -105,9 +120,7 @@ def detect_liquidity_sweep(
         sweep_extreme=sweep_extreme,
         atr_m5=atr_m5,
     )
-    source_ts = confirmation.name
-    if not isinstance(source_ts, datetime):
-        return None
+    source_ts = confirmation_ts
 
     debug: dict[str, Any] = {
         "atr_m5": float(atr_m5),

@@ -16,6 +16,25 @@ Pattern (LONG bullish TREND; SHORT bearish TREND mirrors)
 Plus a structure cross-check: ``get_structure_state(df_m5).recent_pattern``
 must agree with the TREND direction (HH/HL for bullish, LH/LL for
 bearish).
+
+Spec interpretation (M1, review 2026-05-14)
+-------------------------------------------
+Spec §5.2 wording reads "a counter-trend retrace of at least 2–3 M5
+bars". v1 inspects only the single ``df_m5.iloc[-3]`` bar as the
+pullback — bars further back are not re-validated as "still part of
+the retrace". The simplification is deliberate:
+
+- A 2-bar retrace where the *second* bar (`iloc[-3]`) wick-touches
+  EMA50 still qualifies under the v1 rule.
+- A 3+ bar retrace where the touch happened earlier than `iloc[-3]`
+  is missed; the spec's structure check (recent_pattern alignment)
+  partially compensates by requiring HH/HL (or LH/LL) over the
+  10-bar lookback window.
+
+v2 may relax to walk back N bars looking for the touch. Until then,
+the cleanest reading is: "the bar that triggers the setup is the
+one that touched EMA50". Setups where the touch is older than that
+are intentionally skipped.
 """
 from __future__ import annotations
 
