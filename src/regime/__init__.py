@@ -23,13 +23,14 @@ from .classifier import (
     classify_h1,
     compute_structural_pattern,
 )
-from .engine import RegimeEngine
+from .engine import RegimeEmission, RegimeEngine
 from .labels import Confidence, Direction, RegimeLabel
 from .state import RegimeState, to_dict
 
 __all__ = [
     "Confidence",
     "Direction",
+    "RegimeEmission",
     "RegimeEngine",
     "RegimeLabel",
     "RegimeState",
