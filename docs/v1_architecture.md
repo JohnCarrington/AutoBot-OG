@@ -950,6 +950,48 @@ bar close, and the stop is moved to the more conservative of the two
 **Fixed pip trails are not used in v1.** They produce worse trend
 captures and have no structural justification.
 
+### 6.3.1 Phase 6 locked SL decisions
+
+Captured here so future revisions can re-litigate them deliberately
+(review attribution: Phase 6 build, 2026-05-14):
+
+- **BE move with buffer.** Spec §6.2 reads "move to break-even".
+  Literal interpretation places the new SL exactly at entry, which
+  can immediately re-trigger on spread oscillation at the +1R bar.
+  v1 uses ``EXECUTION_BE_MOVE_BUFFER_PIPS = 1.0`` — small enough to
+  keep the move "free-roll", large enough to clip typical major-FX
+  spread oscillation. For LONG: ``new_sl = entry + buffer``; SHORT
+  mirrors.
+- **Trail gates on BE move.** Trailing logic is **not** active until
+  the BE-amend lands successfully (``position.trail_active`` flips
+  ``True``). Trailing a pre-BE position can squeeze a still-developing
+  trade.
+- **Conservative-candidate definition.** For a LONG, conservative =
+  ``max(primary, secondary, current_sl)`` (closer-to-price). For a
+  SHORT, conservative = ``min(...)``. Wrong-side candidates (e.g.
+  EMA20 *above* current price on a long) are rejected before the
+  pick. Stops never widen — the candidate must improve on
+  ``current_sl_price``.
+- **Strategy → trail priority (§6.3 codified).** ``bb_reclaim``:
+  EMA20 primary, swing secondary. ``ema_continuation`` and
+  ``liquidity_sweep``: swing primary, EMA20 secondary. The
+  ``trail_*_primary`` / ``trail_*_secondary`` reason strings record
+  which one applied.
+- **SL amend min-delta hysteresis.** A candidate move <
+  ``EXECUTION_SL_AMEND_MIN_DELTA_PIPS = 1.0`` pip is skipped — avoids
+  burning REST allowance on every M5 close when the trail candidate
+  drifted < 1p. Comparison done in pip-space with a sub-pip
+  epsilon to tolerate FP rounding of 4-decimal quotes.
+- **R-multiple anchor preserved across restarts.** ``initial_sl_price``
+  is persisted in ``data/execution/positions.json`` and never mutated;
+  ``current_pnl_r`` is always computed against it. A bot restart
+  cannot lose the +1R reference.
+- **Amend failure → retry once.** ``EXECUTION_AMEND_RETRY_COUNT = 1``
+  with a ``EXECUTION_AMEND_RETRY_DELAY_S = 2.0`` second delay. Two
+  consecutive failures surface as ``AmendResult.success = False``
+  and leave local SL state untouched — the next reconciliation pass
+  resolves drift against broker truth.
+
 ### 6.4 Partial exits
 
 **None in v1.** Every trade is one position with one exit.
@@ -1185,6 +1227,119 @@ The engine appends a `RegimeEmission` snapshot at the end of every
 `process_h1_close` / `process_m5_close` (bounded deque, `maxlen=2000`).
 The snapshot carries enough to drive both the commits-in-window and
 M5-resets-in-window scans without re-walking history.
+
+### 6.11 Phase 6 module structure
+
+The execution layer ships as `src/execution/` plus a thin IG REST
+wrapper in `src/feed/ig_rest/`. The execution code never imports
+``trading_ig`` directly — it depends on :py:class:`feed.ig_rest.IGClient`,
+which is the single seam where the third-party library can be
+mocked.
+
+```
+src/execution/
+├── types.py                  # ExecutionPosition, AmendOrder/Result,
+│                             # TradeOrder/Result, ReconciliationEvent
+├── constants.py              # env-overridable tunables (EXECUTION_*)
+├── executor.py               # Executor — Signal → broker open + amend
+├── position_manager.py       # PositionManager — in-memory dict + indices
+├── sl_management.py          # evaluate_sl_amend (pure)
+├── reconciliation.py         # broker-vs-local divergence pass (pure)
+└── state/
+    └── positions_state.py    # JSON-backed persistence (atomic write)
+
+src/feed/ig_rest/
+├── auth.py                   # env loader + IGService factory
+├── client.py                 # IGClient (allowance + dispatch)
+├── positions.py              # open / amend / close / read wrappers
+├── markets.py                # /markets metadata (Phase 7 consumer)
+├── history.py                # historical bars (Phase 7 consumer)
+├── allowance.py              # rolling-window REST counter + backoff
+└── types.py                  # request / response dataclasses
+```
+
+#### Dependency pin
+
+``trading_ig==0.0.16`` (pyproject.toml). Discovered from the
+production bot's ``requirements.txt``; the legacy ``ig_auth.py``
+compatibility shims are written against this exact version. Bumping
+invalidates those shims and requires re-testing against the live
+demo endpoint.
+
+#### Position model
+
+:py:class:`ExecutionPosition` is a **distinct** frozen dataclass from
+:py:class:`risk.types.OpenPosition`. The risk type is the *input*
+to ``RiskGuard.allow_entry``; the execution type is the *tracked
+broker state*. ``ExecutionPosition.to_risk_open_position(current_price)``
+is the adapter the Phase 7 bot loop uses to feed EOD enforcement.
+
+#### Idempotency
+
+A duplicate :py:class:`Signal` arriving for an already-open position
+is silently ignored. The idempotency key is the triple
+``(pair, strategy_name, source_candle_ts)``. The position manager
+maintains a ``_by_signal_source`` index that
+:py:meth:`Executor.open_from_signal` consults before submitting any
+order — no double-opens, no errors, the caller sees a success
+``TradeResult`` wrapping the pre-existing position.
+
+#### Reconciliation
+
+10-minute interval (``EXECUTION_RECONCILIATION_INTERVAL_MIN``,
+env-overridable). The conservative alternative is 5 minutes —
+adopt that if API allowance budget permits. The engine is
+**read-only** with respect to the position manager; it emits a
+:py:class:`ReconciliationOutcome` whose ``ReconciliationActions``
+the caller applies explicitly.
+
+Rules (codified in :py:func:`execution.reconciliation.reconcile`):
+
+| Local | Broker | Action |
+|---|---|---|
+| Matched, SL equal | Matched, SL equal | No-op |
+| Matched, SL drift ≤ 5p | (same) | INFO event; silently adopt broker SL |
+| Matched, SL drift > 5p | (same) | WARNING event; adopt broker SL |
+| Matched, broker SL not in local history | (same) | WARNING event ``MANUAL_SL_MOVE``; adopt broker SL |
+| Missing on broker, close confirmation in deal log | absent | INFO event ``POSITION_CLOSED``; schedule local removal |
+| Missing on broker, no close confirmation | absent | **ALERT** event ``MISSING_LOCAL_KEPT``; **keep** local state |
+| Local position open > 8h | present | WARNING event ``STALE_POSITION``; investigate |
+| absent | broker reports open | **ALERT** event ``BROKER_ORPHAN``; **never auto-import** |
+
+Manual broker actions (web-UI close, manual SL move) are
+**normal-path** observations — the log captures them at the
+appropriate severity for the Phase 7 alerts module to forward.
+
+#### Persistence
+
+``data/execution/positions.json`` — schema-versioned JSON, atomic
+write via tempfile + ``os.replace``. Fail-open load on corruption
+(empty state + WARNING log).
+
+``data/execution/reconciliation_events.jsonl`` — append-only event
+log for the Phase 7 alerts module.
+
+Both files live under the gitignored ``data/`` subtree.
+
+#### Env-var overrides
+
+All tunables in ``execution/constants.py`` follow the
+``EXECUTION_<NAME>`` pattern. Defaults match this section.
+Selected:
+
+- ``EXECUTION_DEFAULT_SIZE_UNITS = 1.0``
+- ``EXECUTION_BE_MOVE_BUFFER_PIPS = 1.0``
+- ``EXECUTION_SL_AMEND_MIN_DELTA_PIPS = 1.0``
+- ``EXECUTION_SL_DRIFT_WARN_PIPS = 5.0``
+- ``EXECUTION_STALE_POSITION_HOURS = 8.0``
+- ``EXECUTION_RECONCILIATION_INTERVAL_MIN = 10``
+- ``EXECUTION_BROKER_ORPHAN_ALERT = True``
+- ``EXECUTION_AMEND_RETRY_COUNT = 1``
+- ``EXECUTION_AMEND_RETRY_DELAY_S = 2.0``
+
+REST allowance:
+
+- ``IG_ALLOWANCE_RPM = 30`` — IG's documented public floor.
 
 ---
 

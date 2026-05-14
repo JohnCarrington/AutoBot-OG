@@ -8,6 +8,25 @@ version = "0.0.0"
 description = "Systematic FX trading bot (v1, GBPUSD) — regime-gated multi-strategy."
 requires-python = ">=3.12"
 readme = "README.md"
+dependencies = [
+    # Pandas / numpy pinned to the versions the v1 indicator and risk layers
+    # were written against (Phases 1-5). Bumping without re-running the suite
+    # risks subtle pandas-API drift (e.g. DataFrame.iloc behaviour, dtype
+    # coercion). Keep these tight until a deliberate upgrade pass.
+    "pandas==2.3.3",
+    "numpy==2.2.6",
+    # Phase 6 — IG broker connectivity. Pin to the exact production version
+    # the legacy /home/autobot/autobot-og-port-staging/requirements.txt
+    # ships. The trading_ig 0.0.16 quirks (resolution string handling,
+    # token-extraction surface) are codified in feed/ig_rest/auth.py;
+    # bumping the version invalidates those shims and requires a full
+    # adapter re-test against the live IG demo endpoint.
+    "trading-ig==0.0.16",
+    # Required by trading_ig for IGService construction and used by the
+    # ig_rest.auth module to load credentials from .env. Pinned loosely
+    # because it has no surface-shaped API in our wrapper.
+    "python-dotenv>=1.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
