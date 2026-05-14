@@ -16,6 +16,24 @@ The applier is *cold-start friendly*: given any window of H1 + M5 history,
 it replays from the beginning of that window. M5 bars that occur before
 any H1 event has been processed receive a ``TRANSITION`` / not-live row.
 
+Timestamp-anchor convention (H4)
+--------------------------------
+v1 requires **bar-close-anchored** indices on both ``df_h1`` and ``df_m5``:
+the bar at timestamp ``t`` represents price action ending at ``t``.
+
+- H1@01:00 covers the hour ``(00:00, 01:00]``.
+- M5@01:00 covers the five minutes ``(00:55, 01:00]``.
+
+At a shared timestamp ``t`` the H1 close and the M5 close are simultaneous
+events; sorting H1 first is correct because the H1 print is the regime in
+force at that instant. **Open-anchored** data (where ``t`` means
+``[t, t+freq)``) would push lookahead bias into the applier — pass it
+through ``resample(..., label="right")`` first.
+
+This convention is enforced by the keyword-only ``h1_anchor`` argument:
+the only value accepted in v1 is ``"close"``. Any other value raises
+``NotImplementedError`` with a clear remediation hint.
+
 H1 input requirements
 ---------------------
 The H1 frame must already carry the indicator columns the classifier reads
@@ -34,7 +52,7 @@ required value will simply fail validation (counter does not advance).
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import pandas as pd
 
@@ -55,6 +73,8 @@ def apply_regime_to_candles(
     df_h1: pd.DataFrame,
     df_m5: pd.DataFrame,
     engine: RegimeEngine,
+    *,
+    h1_anchor: Literal["close"] = "close",
 ) -> pd.DataFrame:
     """Replay events through ``engine`` and annotate a copy of ``df_m5``.
 
@@ -62,6 +82,7 @@ def apply_regime_to_candles(
     ----------
     df_h1 : DataFrame
         Enriched H1 candles (indicators + fractal swings already applied).
+        Must be bar-close anchored — see module docstring.
     df_m5 : DataFrame
         Enriched M5 candles. Indexed by timestamp (DatetimeIndex) for the
         chronological replay to be meaningful; integer indices work for
@@ -70,6 +91,10 @@ def apply_regime_to_candles(
         The engine instance to replay through. Caller-supplied so that
         warm-started engines can be passed in (e.g. resumed from a saved
         state in a future iteration).
+    h1_anchor : Literal["close"], keyword-only, default ``"close"``
+        Asserts the timestamp-anchoring convention of ``df_h1``. v1 only
+        supports bar-close-anchored data. Passing anything else raises
+        ``NotImplementedError`` with a hint to ``resample(label="right")``.
 
     Returns
     -------
@@ -81,7 +106,18 @@ def apply_regime_to_candles(
     ValueError
         If ``df_h1`` lacks the columns required to compute the structural
         pattern (``swing_high`` / ``swing_low`` / ``high`` / ``low``).
+    NotImplementedError
+        If ``h1_anchor`` is anything other than ``"close"``.
     """
+    if h1_anchor != "close":
+        raise NotImplementedError(
+            f"apply_regime_to_candles: h1_anchor={h1_anchor!r} is not "
+            f"supported in v1. Bar-close anchoring is required — convert "
+            f"open-anchored H1 data with `df.resample('1h', label='right', "
+            f"closed='right').last()` (or equivalent) before calling this "
+            f"function."
+        )
+
     out = df_m5.copy()
     if df_m5.empty:
         for col in _OUTPUT_COLUMNS:

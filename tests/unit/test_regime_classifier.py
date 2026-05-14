@@ -245,3 +245,39 @@ def test_classify_nan_indicators_emits_transition() -> None:
     assert direction is None
     assert conf == Confidence.LOW
     assert reason == "insufficient_indicator_data"
+
+
+def test_classify_macd_nan_uses_no_macd_reason() -> None:
+    """N3: MACD NaN does not block TREND classification (lowest-priority
+    signal per spec hierarchy) but surfaces a distinct ``reason`` so the
+    diagnostic is clear. Confidence falls to MEDIUM by design — HIGH
+    requires evaluable MACD agreement.
+    """
+    row = _h1_row(
+        structural_pattern="HH+HL",
+        slope=0.40,
+        bb_width=2.0,
+        macd_hist=float("nan"),
+    )
+    label, direction, conf, reason = classify_h1(row)
+    assert label == RegimeLabel.TREND
+    assert direction == Direction.BULLISH
+    assert conf == Confidence.MEDIUM
+    assert reason == "classified_no_macd"
+
+
+def test_classify_macd_nan_for_range_keeps_classified_reason() -> None:
+    """N3 boundary: MACD is irrelevant for RANGE classification, so a
+    NaN macd_hist on a RANGE candidate keeps the regular reason code.
+    """
+    row = _h1_row(
+        structural_pattern="INSUFFICIENT_DATA",
+        slope=0.05,
+        bb_width=1.5,
+        macd_hist=float("nan"),
+    )
+    label, direction, conf, reason = classify_h1(row)
+    assert label == RegimeLabel.RANGE
+    assert direction is None
+    assert conf == Confidence.MEDIUM
+    assert reason == "classified"

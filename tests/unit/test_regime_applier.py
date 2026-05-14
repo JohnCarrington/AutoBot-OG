@@ -175,6 +175,22 @@ def test_apply_cold_start_replay_idempotent() -> None:
     pd.testing.assert_frame_equal(a, b)
 
 
+def test_apply_rejects_unsupported_h1_anchor() -> None:
+    """H4: open-anchored timestamps are rejected loudly.
+
+    v1 only supports bar-close anchoring; the caller must say so
+    explicitly via the keyword-only ``h1_anchor`` parameter.
+    """
+    import pytest
+
+    h1 = _enrich_h1(_build_trending_h1(60))
+    m5 = _enrich_m5(_build_trending_m5(60))
+    with pytest.raises(NotImplementedError, match="h1_anchor"):
+        # Type-checking would catch this at static-analysis time; the
+        # runtime check is the last-mile safety net.
+        apply_regime_to_candles(h1, m5, RegimeEngine(), h1_anchor="open")  # type: ignore[arg-type]
+
+
 def test_apply_regime_can_change_within_dataset() -> None:
     # A series that flattens then trends — we expect the regime column to
     # contain more than one distinct label across the whole frame.

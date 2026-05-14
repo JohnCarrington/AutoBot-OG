@@ -84,21 +84,19 @@ class RegimeEngine:
     # --- Public query API ----------------------------------------------------
 
     def is_live(self) -> bool:
-        """Return ``True`` if the current regime is executable.
+        """Return ``True`` if the *currently committed* regime is executable.
 
-        A regime is live when either:
-        - it is ``VOLATILE`` (no M5 gate by design), or
-        - there is no pending transition awaiting M5 confirmation.
+        A regime is live iff ``current_regime`` is anything other than
+        ``TRANSITION``. An in-flight ``pending_regime`` does **not**
+        suppress liveness — strategies should keep trading the committed
+        regime until the pending one is confirmed by M5 and promoted.
 
-        A fresh engine (current=TRANSITION, no pending) is *not* live; the
-        regime engine has nothing meaningful to emit until at least one H1
-        close has been processed.
+        A fresh engine (current=TRANSITION, pending=None) is not live; an
+        engine staging its very first transition (current=TRANSITION,
+        pending=TREND awaiting M5) is also not live because nothing is
+        committed yet.
         """
-        if self.current_regime == RegimeLabel.TRANSITION and self.pending_regime is None:
-            return False
-        if self.current_regime == RegimeLabel.VOLATILE:
-            return True
-        return self.pending_regime is None
+        return self.current_regime != RegimeLabel.TRANSITION
 
     def get_state(self) -> RegimeState:
         """Return a serialisable snapshot of the engine's current state."""
@@ -111,7 +109,24 @@ class RegimeEngine:
         h1_row: pd.Series,
         prev_h1_row: Optional[pd.Series] = None,
     ) -> None:
-        """Consume a single H1 close and update internal state."""
+        """Consume a single H1 close and update internal state.
+
+        The branch order matters and is contractual:
+
+        1. NaN-indicator guard (C2): if the classifier reports
+           ``insufficient_indicator_data``, the engine refuses to mutate
+           any committed or pending state — a missing indicator value
+           must never demote a real regime.
+        2. VOLATILE state machine: stay-or-cooldown.
+        3. Normal hysteresis, then a three-way disambiguation:
+           - ``final == current``  → no transition; clear any pending,
+             counter goes to 0 (nothing to confirm).
+           - ``final == pending``  → re-emit of the same in-flight
+             transition; refresh pending metadata, **counter preserved**
+             (this is the C1 fix).
+           - otherwise              → fresh transition staged; counter
+             reset to 0. VOLATILE commits immediately.
+        """
         naive_label, naive_dir, naive_conf, naive_reason = classify_h1(
             h1_row, prev_h1_row
         )
@@ -130,6 +145,37 @@ class RegimeEngine:
                 h1_row.get("structural_pattern", "INSUFFICIENT_DATA")
             ),
         }
+
+        # --- C2: NaN-indicator guard -----------------------------------------
+        # A missing slope or BB-width on a single bar (gap, vendor outage,
+        # warmup) must not demote the committed regime. Surface the no-op
+        # via ``reason`` for diagnostics, then bail.
+        if naive_reason == "insufficient_indicator_data":
+            self.reason = naive_reason
+            return
+
+        # --- H1: slope sign-flip routes through VOLATILE ---------------------
+        # A direct +/- flip on a committed TREND is more likely a whipsaw,
+        # news shock or mis-printed bar than a clean regime change. Rather
+        # than letting the bot fire a counter-trend signal on the very next
+        # M5, demote the naive emission to VOLATILE — the existing
+        # ``VOLATILE_EXIT_QUIET_H1_BARS`` cooldown then governs how (and
+        # when) the new direction is eventually accepted via normal
+        # hysteresis + M5 confirmation.
+        if (
+            self.current_regime == RegimeLabel.TREND
+            and naive_label == RegimeLabel.TREND
+            and self.current_direction is not None
+            and naive_dir is not None
+            and naive_dir != self.current_direction
+        ):
+            naive_label = RegimeLabel.VOLATILE
+            naive_dir = None
+            naive_reason = "slope_sign_flip"
+            naive_conf = Confidence.LOW
+            self.debug["naive_reason"] = naive_reason
+            self.debug["naive_regime"] = naive_label.value
+            self.debug["naive_direction"] = None
 
         timestamp = h1_row.name
 
@@ -157,9 +203,18 @@ class RegimeEngine:
             if self._volatile_quiet_count < VOLATILE_EXIT_QUIET_H1_BARS:
                 # Still cooling down; hold VOLATILE.
                 self.reason = "volatile_cooldown"
-                self.pending_regime = None
-                self.pending_direction = None
-                self.m5_confirmation_count = 0
+                # N1 fix: preserve any non-VOLATILE pending staged by a
+                # prior fall-through. M5 must be allowed to confirm it
+                # across multiple H1 windows — wiping it on every
+                # cooldown bar made the recovery path effectively
+                # impossible on interleaved data. Only wipe a VOLATILE
+                # pending (defensive — VOLATILE pending normally
+                # auto-commits inside process_h1_close, so this should
+                # not arise in practice).
+                if self.pending_regime == RegimeLabel.VOLATILE:
+                    self.pending_regime = None
+                    self.pending_direction = None
+                    self.m5_confirmation_count = 0
                 return
             # Quiet period satisfied — fall through to normal hysteresis,
             # which will treat the next regime as a fresh entry.
@@ -170,13 +225,13 @@ class RegimeEngine:
             naive_label, naive_dir, slope, bb_width
         )
 
-        same = (
+        matches_current = (
             final_label == self.current_regime
             and final_dir == self.current_direction
         )
-        if same:
-            # No regime change — just refresh confidence/reason and clear
-            # any in-flight pending transition.
+        if matches_current:
+            # No regime change — refresh confidence/reason and clear any
+            # in-flight pending transition (the H1 has changed its mind).
             self.current_confidence = naive_conf
             self.reason = naive_reason
             self.pending_regime = None
@@ -184,7 +239,21 @@ class RegimeEngine:
             self.m5_confirmation_count = 0
             return
 
-        # Regime change: stage as pending, await M5 confirmation. VOLATILE
+        matches_pending = (
+            self.pending_regime is not None
+            and final_label == self.pending_regime
+            and final_dir == self.pending_direction
+        )
+        if matches_pending:
+            # C1 fix: same pending re-emitted by H1. Preserve the M5
+            # confirmation counter — agreeing M5 bars accumulated under
+            # the previous H1 print are still valid evidence.
+            self.pending_confidence = naive_conf
+            self.pending_reason = naive_reason
+            self.reason = naive_reason
+            return
+
+        # Fresh transition: stage as pending, reset counter. VOLATILE
         # commits immediately (no M5 gate).
         self.pending_regime = final_label
         self.pending_direction = final_dir
@@ -232,6 +301,20 @@ class RegimeEngine:
         entry thresholds. Structure-driven and VOLATILE transitions are
         not subject to hysteresis: explicit events take priority over
         threshold smoothing.
+
+        Specific overrides applied in order:
+
+        - Explicit ``VOLATILE`` naive emission always wins (this includes
+          the H1 sign-flip case: the upstream override in
+          ``process_h1_close`` converts a TREND→opposite-TREND naive into
+          a VOLATILE one with reason ``"slope_sign_flip"`` before
+          hysteresis sees it).
+        - Sticky TREND bullish / bearish hold while ``|slope|`` is still
+          beyond ``SLOPE_FLAT_BAND`` *in the same sign*.
+        - **H3 fix**: the sticky RANGE branch defers to a TREND naive
+          emission that carries direction — a structure-backed or
+          strong-slope TREND breakout breaks the RANGE lock immediately
+          even when ``bb_width`` is still inside the hysteresis band.
         """
         # Explicit VOLATILE entry always wins (volatility is a real event,
         # not a borderline reading).
@@ -263,13 +346,22 @@ class RegimeEngine:
         ):
             return RegimeLabel.TREND, Direction.BEARISH
 
-        # Sticky RANGE exit: only leave once width exceeds the upper band.
-        if (
-            self.current_regime == RegimeLabel.RANGE
-            and not math.isnan(bb_width)
-            and bb_width <= BB_WIDTH_RANGE_EXIT
-        ):
-            return RegimeLabel.RANGE, None
+        # Sticky RANGE exit: only leave once width exceeds the upper band,
+        # except that a structure-backed or strong-slope TREND breakout
+        # (naive == TREND with a non-None direction) immediately wins —
+        # the classifier already gated those signals through structure
+        # priority or |slope| > SLOPE_TREND_ENTRY, so the BB-width sticky
+        # check should not override them (H3).
+        if self.current_regime == RegimeLabel.RANGE:
+            structure_or_strong_trend_breakout = (
+                naive_label == RegimeLabel.TREND and naive_dir is not None
+            )
+            if (
+                not structure_or_strong_trend_breakout
+                and not math.isnan(bb_width)
+                and bb_width <= BB_WIDTH_RANGE_EXIT
+            ):
+                return RegimeLabel.RANGE, None
 
         return naive_label, naive_dir
 
@@ -301,9 +393,10 @@ class RegimeEngine:
                 return False
             return lower <= close <= upper and width < BB_WIDTH_RANGE_EXIT
 
-        # TRANSITION isn't a regime callers should ever validate into,
-        # but treat any M5 close as agreement (no-op).
-        return True
+        # H5: refuse anything that isn't TREND or RANGE (VOLATILE is
+        # short-circuited above and TRANSITION/anything-else must NOT
+        # auto-confirm through the no-op gate).
+        return False
 
     def _commit_pending(self, timestamp: Any) -> None:
         """Promote ``pending_*`` to ``current_*`` and clear the pending slot."""

@@ -249,12 +249,24 @@ def classify_h1(
         )
 
     # Priority 4: MACD — affects confidence tier only.
+    # N3 design choice: MACD is the lowest-priority signal (confidence-only
+    # in the spec hierarchy), so a NaN macd_hist does NOT block TREND
+    # classification. It does, however, surface a distinct reason code
+    # ("classified_no_macd") so downstream diagnostics can distinguish
+    # "MACD evaluated and disagreed" (reason="classified", confidence=
+    # MEDIUM) from "MACD unavailable" (reason="classified_no_macd",
+    # confidence=MEDIUM). The confidence tier sits at MEDIUM in both cases
+    # because HIGH requires evaluable MACD agreement.
     confidence = Confidence.MEDIUM
+    reason = "classified"
     if candidate_label == RegimeLabel.TREND:
-        macd_agrees = (
-            (candidate_dir == Direction.BULLISH and macd_hist > 0)
-            or (candidate_dir == Direction.BEARISH and macd_hist < 0)
-        )
-        confidence = Confidence.HIGH if macd_agrees else Confidence.MEDIUM
+        if math.isnan(macd_hist):
+            reason = "classified_no_macd"
+        else:
+            macd_agrees = (
+                (candidate_dir == Direction.BULLISH and macd_hist > 0)
+                or (candidate_dir == Direction.BEARISH and macd_hist < 0)
+            )
+            confidence = Confidence.HIGH if macd_agrees else Confidence.MEDIUM
 
-    return (candidate_label, candidate_dir, confidence, "classified")
+    return (candidate_label, candidate_dir, confidence, reason)

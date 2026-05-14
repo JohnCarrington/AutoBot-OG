@@ -300,3 +300,324 @@ def test_get_state_keys_match_typeddict() -> None:
         "reason",
         "debug",
     }
+
+
+# --- Adversarial-review regression tests (C1, C2, H1, H2, H3, H5) -----------
+
+
+def test_m5_counter_survives_repeated_h1_emits_same_regime() -> None:
+    """C1: H1 re-emitting the same pending regime must NOT reset the counter.
+
+    Reproduces the bug described in the review: with the M5 counter at 2
+    and a second identical H1 close arriving, the engine used to reset
+    the counter to 0, making a confirm-on-next-M5 case effectively
+    impossible to satisfy on choppy data.
+    """
+    eng = RegimeEngine()
+    eng.process_h1_close(
+        _h1(structural_pattern="HH+HL", slope=0.45, bb_width=2.0, macd_hist=0.1)
+    )
+    assert eng.pending_regime == RegimeLabel.TREND
+    assert eng.m5_confirmation_count == 0
+
+    eng.process_m5_close(_m5_trend(slope=0.10, ema=100.0, close=101.0))
+    eng.process_m5_close(_m5_trend(slope=0.10, ema=100.0, close=101.0))
+    assert eng.m5_confirmation_count == 2
+
+    # Second H1 close with identical inputs — pending is unchanged.
+    # Counter MUST be preserved.
+    eng.process_h1_close(
+        _h1(structural_pattern="HH+HL", slope=0.45, bb_width=2.0, macd_hist=0.1),
+        prev_h1_row=_h1(slope=0.45, bb_width=2.0),
+    )
+    assert eng.pending_regime == RegimeLabel.TREND
+    assert eng.pending_direction == Direction.BULLISH
+    assert eng.m5_confirmation_count == 2  # critical: not reset
+
+    # One more agreeing M5 close commits.
+    eng.process_m5_close(_m5_trend(slope=0.10, ema=100.0, close=101.0, name="t3"))
+    assert eng.current_regime == RegimeLabel.TREND
+    assert eng.is_live() is True
+
+
+def test_nan_indicator_preserves_current_regime() -> None:
+    """C2: a NaN-indicator H1 close must NOT demote a committed regime.
+
+    Reproduces the bug: a single missing-slope row would stage
+    pending=TRANSITION and (with the H5 bug) commit it via the no-op M5
+    gate, dropping a real TREND on the floor.
+    """
+    eng = RegimeEngine()
+    # Get into a committed TREND first.
+    eng.process_h1_close(
+        _h1(structural_pattern="HH+HL", slope=0.45, bb_width=2.0, macd_hist=0.1)
+    )
+    for _ in range(3):
+        eng.process_m5_close(_m5_trend(slope=0.10, ema=100.0, close=101.0))
+    assert eng.current_regime == RegimeLabel.TREND
+    assert eng.current_direction == Direction.BULLISH
+
+    # Now an H1 with NaN slope — classifier returns "insufficient_indicator_data".
+    eng.process_h1_close(
+        _h1(slope=float("nan"), bb_width=float("nan")),
+        prev_h1_row=_h1(slope=0.45, bb_width=2.0),
+    )
+    # Committed regime preserved; no pending downgrade staged.
+    assert eng.current_regime == RegimeLabel.TREND
+    assert eng.current_direction == Direction.BULLISH
+    assert eng.pending_regime is None
+    assert eng.m5_confirmation_count == 0
+    # Reason surfaces the no-op so it is visible in diagnostics.
+    assert eng.reason == "insufficient_indicator_data"
+
+
+def test_nan_indicator_on_fresh_engine_stays_transition() -> None:
+    """C2 edge: NaN on a never-committed engine leaves it in TRANSITION."""
+    eng = RegimeEngine()
+    eng.process_h1_close(_h1(slope=float("nan"), bb_width=float("nan")))
+    assert eng.current_regime == RegimeLabel.TRANSITION
+    assert eng.pending_regime is None
+    assert eng.reason == "insufficient_indicator_data"
+    assert eng.is_live() is False
+
+
+def test_slope_sign_flip_exits_trend() -> None:
+    """H1: direct sign flip on a committed TREND routes through VOLATILE.
+
+    A sudden +/- flip is more likely a whipsaw or news shock than a clean
+    regime change. The engine commits VOLATILE immediately (no M5 gate),
+    and the standard VOLATILE_EXIT_QUIET_H1_BARS cooldown then governs
+    when (and how) the opposite direction is eventually accepted via the
+    normal hysteresis + M5 confirmation path.
+    """
+    eng = RegimeEngine()
+    eng.process_h1_close(
+        _h1(structural_pattern="INSUFFICIENT_DATA", slope=0.40, bb_width=2.0)
+    )
+    for _ in range(3):
+        eng.process_m5_close(_m5_trend(slope=0.10, ema=100.0, close=101.0))
+    assert eng.current_regime == RegimeLabel.TREND
+    assert eng.current_direction == Direction.BULLISH
+
+    # Slope flips sign from +0.40 to -0.40 — would-be naive is
+    # TREND/BEARISH but the engine demotes that to VOLATILE.
+    eng.process_h1_close(
+        _h1(structural_pattern="INSUFFICIENT_DATA", slope=-0.40, bb_width=2.0),
+        prev_h1_row=_h1(slope=0.40, bb_width=2.0),
+    )
+    # VOLATILE commits immediately (no M5 gate); the previous bullish bias
+    # is discarded — VOLATILE is direction-less here.
+    assert eng.current_regime == RegimeLabel.VOLATILE
+    assert eng.current_direction is None
+    assert eng.pending_regime is None
+    assert eng.reason == "slope_sign_flip"
+    # is_live remains True — VOLATILE is executable for sweep strategies.
+    assert eng.is_live() is True
+
+
+def test_slope_sign_flip_then_quiet_eventually_accepts_opposite_trend() -> None:
+    """H1 + N1 follow-through with realistic interleaved H1/M5 sequence.
+
+    After a sign-flip routes through VOLATILE, the recovery requires:
+    - VOLATILE_EXIT_QUIET_H1_BARS quiet H1 closes → fall-through stages
+      pending=TREND/BEARISH
+    - 3 agreeing M5 closes → pending committed
+
+    Crucially, those 3 M5 confirmations may arrive across **multiple H1
+    windows**. The interleaved H1 closes during recovery must NOT wipe
+    the staged pending (N1 fix) and must NOT reset the M5 counter.
+    """
+    eng = RegimeEngine()
+    # Commit TREND bullish.
+    eng.process_h1_close(
+        _h1(structural_pattern="INSUFFICIENT_DATA", slope=0.40, bb_width=2.0)
+    )
+    for _ in range(3):
+        eng.process_m5_close(_m5_trend(slope=0.10, ema=100.0, close=101.0))
+    assert eng.current_regime == RegimeLabel.TREND
+
+    # Sign-flip bar -> VOLATILE.
+    eng.process_h1_close(
+        _h1(structural_pattern="INSUFFICIENT_DATA", slope=-0.40, bb_width=2.0),
+        prev_h1_row=_h1(slope=0.40, bb_width=2.0),
+    )
+    assert eng.current_regime == RegimeLabel.VOLATILE
+    assert eng.reason == "slope_sign_flip"
+
+    quiet_bear = _h1(
+        structural_pattern="INSUFFICIENT_DATA", slope=-0.40, bb_width=2.0
+    )
+    bearish_m5 = _m5_trend(slope=-0.10, ema=100.0, close=99.0)
+
+    # Three quiet H1 closes → fall-through stages pending=TREND/BEARISH.
+    for _ in range(3):
+        eng.process_h1_close(quiet_bear, prev_h1_row=quiet_bear)
+    assert eng.pending_regime == RegimeLabel.TREND
+    assert eng.pending_direction == Direction.BEARISH
+    assert eng.m5_confirmation_count == 0
+
+    # Interleaved recovery: M5, H1, M5, H1, M5 — N1 says pending and
+    # counter must both survive every interleaved H1.
+    eng.process_m5_close(bearish_m5)
+    assert eng.m5_confirmation_count == 1
+    assert eng.pending_regime == RegimeLabel.TREND
+
+    # H1 #N+1 during recovery — would have wiped pending before N1 fix.
+    eng.process_h1_close(quiet_bear, prev_h1_row=quiet_bear)
+    assert eng.pending_regime == RegimeLabel.TREND, "N1: pending wiped"
+    assert eng.pending_direction == Direction.BEARISH
+    assert eng.m5_confirmation_count == 1, "N1: counter reset"
+    # The engine is still in committed VOLATILE — strategies remain live.
+    assert eng.current_regime == RegimeLabel.VOLATILE
+    assert eng.is_live() is True
+
+    eng.process_m5_close(bearish_m5)
+    assert eng.m5_confirmation_count == 2
+
+    # H1 #N+2 — pending and counter again must survive.
+    eng.process_h1_close(quiet_bear, prev_h1_row=quiet_bear)
+    assert eng.pending_regime == RegimeLabel.TREND
+    assert eng.m5_confirmation_count == 2
+
+    # Final agreeing M5 → commit across multi-H1-window confirmation.
+    eng.process_m5_close(bearish_m5)
+    assert eng.current_regime == RegimeLabel.TREND
+    assert eng.current_direction == Direction.BEARISH
+    assert eng.is_live() is True
+
+
+def test_oscillating_sign_flip_does_not_stick_in_volatile() -> None:
+    """N2: alternating H1 slope signs during cooldown still allow recovery
+    once a quiet period emerges and M5 confirmations arrive.
+
+    The VOLATILE quiet counter is directional-agnostic — it advances on
+    *any* non-VOLATILE naive emission. With N1 fixed, a pending staged
+    by fall-through survives subsequent H1 closes long enough for M5
+    confirmations to commit it. Before N1 was fixed, oscillating slope
+    could trap the engine in VOLATILE permanently.
+    """
+    eng = RegimeEngine()
+    # Commit TREND bullish first.
+    eng.process_h1_close(
+        _h1(structural_pattern="INSUFFICIENT_DATA", slope=0.40, bb_width=2.0)
+    )
+    for _ in range(3):
+        eng.process_m5_close(_m5_trend(slope=0.10, ema=100.0, close=101.0))
+    assert eng.current_regime == RegimeLabel.TREND
+
+    bull = _h1(structural_pattern="INSUFFICIENT_DATA", slope=0.40, bb_width=2.0)
+    bear = _h1(structural_pattern="INSUFFICIENT_DATA", slope=-0.40, bb_width=2.0)
+    bullish_m5 = _m5_trend(slope=0.10, ema=100.0, close=101.0)
+
+    # Sign-flip → VOLATILE.
+    eng.process_h1_close(bear, prev_h1_row=bull)
+    assert eng.current_regime == RegimeLabel.VOLATILE
+
+    # Oscillating quiet bars: bull, bear, bull. The third bar's vote
+    # (bullish) is staged at fall-through.
+    eng.process_h1_close(bull, prev_h1_row=bear)
+    eng.process_h1_close(bear, prev_h1_row=bull)
+    eng.process_h1_close(bull, prev_h1_row=bear)
+    assert eng.pending_regime == RegimeLabel.TREND
+    assert eng.pending_direction == Direction.BULLISH
+
+    # Slope stabilises bullish; M5 confirms across interleaved H1.
+    eng.process_m5_close(bullish_m5)
+    eng.process_m5_close(bullish_m5)
+    # Interleaved H1 (same direction as pending) — N1: pending survives.
+    eng.process_h1_close(bull, prev_h1_row=bull)
+    assert eng.pending_regime == RegimeLabel.TREND
+    assert eng.m5_confirmation_count == 2
+    eng.process_m5_close(bullish_m5)
+
+    # The engine has accepted a direction — N2 (stuck-in-VOLATILE) is
+    # no longer reachable once N1 is patched.
+    assert eng.current_regime == RegimeLabel.TREND
+    assert eng.current_direction == Direction.BULLISH
+
+
+def test_is_live_during_pending_downgrade() -> None:
+    """H2: a committed regime remains live while a downgrade is pending."""
+    eng = RegimeEngine()
+    # Commit TREND.
+    eng.process_h1_close(
+        _h1(structural_pattern="HH+HL", slope=0.45, bb_width=2.0, macd_hist=0.1)
+    )
+    for _ in range(3):
+        eng.process_m5_close(_m5_trend(slope=0.10, ema=100.0, close=101.0))
+    assert eng.current_regime == RegimeLabel.TREND
+    assert eng.is_live() is True
+
+    # H1 emits a flat-slope downgrade — pending=RANGE is staged.
+    eng.process_h1_close(
+        _h1(structural_pattern="INSUFFICIENT_DATA", slope=0.05, bb_width=1.4),
+        prev_h1_row=_h1(slope=0.10, bb_width=1.4),
+    )
+    assert eng.pending_regime == RegimeLabel.RANGE
+    assert eng.current_regime == RegimeLabel.TREND
+    # The committed regime is still in force — strategies keep trading TREND.
+    assert eng.is_live() is True
+
+
+def test_is_live_initial_state_remains_false() -> None:
+    """H2 regression: fresh engine + an unconfirmed pending is not live."""
+    eng = RegimeEngine()
+    assert eng.is_live() is False
+    eng.process_h1_close(
+        _h1(structural_pattern="HH+HL", slope=0.45, bb_width=2.0, macd_hist=0.1)
+    )
+    # pending=TREND but nothing committed yet -> NOT live.
+    assert eng.pending_regime == RegimeLabel.TREND
+    assert eng.current_regime == RegimeLabel.TRANSITION
+    assert eng.is_live() is False
+
+
+def test_range_hysteresis_breaks_for_trend_emergence() -> None:
+    """H3: a TREND with structure/direction breaks the RANGE-sticky lock.
+
+    With the old logic, a clean HH+HL print with strong slope was held
+    inside RANGE because ``bb_width`` had not yet crossed the upper exit
+    threshold. Hysteresis must now defer to a direction-bearing TREND.
+    """
+    eng = RegimeEngine()
+    # Enter RANGE.
+    eng.process_h1_close(
+        _h1(structural_pattern="INSUFFICIENT_DATA", slope=0.05, bb_width=1.5)
+    )
+    for _ in range(3):
+        eng.process_m5_close(
+            _m5_range(close=100.0, upper=101.0, lower=99.0, width=1.5)
+        )
+    assert eng.current_regime == RegimeLabel.RANGE
+
+    # H1 prints HH+HL with strong slope; bb_width 1.85 is still inside the
+    # RANGE hysteresis band (<= 2.5). Old code held us in RANGE — new code
+    # must stage TREND.
+    eng.process_h1_close(
+        _h1(structural_pattern="HH+HL", slope=0.50, bb_width=1.85, macd_hist=0.1),
+        prev_h1_row=_h1(slope=0.05, bb_width=1.70),
+    )
+    assert eng.pending_regime == RegimeLabel.TREND
+    assert eng.pending_direction == Direction.BULLISH
+
+
+def test_m5_validates_rejects_transition() -> None:
+    """H5: the M5 validator must refuse a pending=TRANSITION on principle.
+
+    With C2 in place, TRANSITION should never be staged as pending — but
+    this guard prevents a future code path from sneaking a no-op
+    confirmation through.
+    """
+    eng = RegimeEngine()
+    # Bypass the C2 guard by manually staging TRANSITION (defensive test).
+    eng.pending_regime = RegimeLabel.TRANSITION
+    eng.pending_direction = None
+    eng.m5_confirmation_count = 0
+    m5 = _m5_trend(slope=0.0, ema=100.0, close=100.0)
+    # Should NOT increment the counter and should NOT commit.
+    eng.process_m5_close(m5)
+    eng.process_m5_close(m5)
+    eng.process_m5_close(m5)
+    assert eng.current_regime == RegimeLabel.TRANSITION
+    # Counter remains 0 — _m5_validates returned False every time.
+    assert eng.m5_confirmation_count == 0
