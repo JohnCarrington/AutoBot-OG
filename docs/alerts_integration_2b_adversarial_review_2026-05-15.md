@@ -789,3 +789,360 @@ this is a clean APPROVE FOR MERGE.
 **P1 (commit hygiene)**: please commit the working tree as
 `feat(bot+execution): Phase 9 commit 2b — wire alerts into BotLoop,
 Executor, bot.main` before merging. Same recipe as commit 2a.
+
+---
+
+## Re-review addendum — 2026-05-15 (commit `65bf751`)
+
+Final pass after the H1 + M1 + M2 fixes from this review's "APPROVE
+WITH CONDITIONS" verdict. The fixes and the original commit-2b
+content landed bundled as a single commit (`65bf751`) — resolving
+the original P1 as a side effect. Full suite: **843 passed,
+0 warnings** (matches expected target of 840 + 3 new regressions).
+
+### H1 — APPROVED with one design note
+
+**`src/execution/executor.py:333-371`** — the upsert is now wrapped
+in try/except. On failure:
+
+1. `logger.critical(..., exc_info=True)` with the full divergence
+   payload (deal_id, broker_new_sl, local_old_sl, exception repr).
+2. `self._emit_amend_persist_failed(position=..., amend=..., exc_summary=str(upsert_exc))`
+   constructs and dispatches the CRITICAL alert.
+3. `raise` — re-raises the original persistence error.
+
+The alert helper has its own internal try/except around
+`self._alerter.send(...)`. If Telegram delivery fails, a nested
+`logger.exception` line warns the operator that the CRITICAL log
+line is the only remaining trace of the divergence. This is the
+right belt-and-braces shape.
+
+**Walk-through (empirical, fresh probe):**
+
+```
+broker accepts amend  → confirmation.status == "ACCEPTED"
+build updated position → position.with_sl_amend(...)
+self._positions.upsert(updated)  → raises OSError("ENOSPC")
+  └─ except Exception as upsert_exc:
+       logger.critical("STATE DIVERGED ... deal_id=D1, broker_new_sl=1.3001, local_old_sl=1.29 ...", exc_info=True)
+       self._emit_amend_persist_failed(...) → alerter.send(AlertSeverity.CRITICAL) → ships immediately
+       raise                                                                       ↑
+                                                                                   send before raise ✓
+caller (BotLoop._run_sl_evaluation) catches Exception, logs, continues to next position
+```
+
+The send-then-raise ordering is correct: CRITICAL bypasses
+coalescing (commit-2a M1 prefix-sweep), so `alerter.send` calls
+`_deliver` synchronously within the same stack frame. The Telegram
+POST returns (or times out) before `raise` is reached. Operator
+sees the alert.
+
+**AMEND_PERSIST_FAILED event subtype** is added correctly:
+
+- `src/alerts/types.py:68` — listed in `EVENT_SUBTYPES`.
+- `src/alerts/types.py:15-19` — listed in the CRITICAL section of
+  the severity docstring with a one-line justification ("broker
+  accepted amend, local persist failed; operator must reconcile
+  manually").
+- Test `test_event_subtypes_includes_locked_set`
+  (test_alerts_types.py:47-53) pins the closed set including
+  AMEND_PERSIST_FAILED.
+
+**Design note (LOW — not a blocker):** the inline comment claims
+"the caller can crash the bot rather than continue with desynced
+state." The actual caller chain is:
+
+```
+BotLoop._run_sl_evaluation:
+    try:
+        self._with_inflight_tracked(
+            lambda a=amend: self._executor.apply_amend(a)
+        )
+    except Exception:
+        logger.exception("Executor.apply_amend raised for deal_id=%s", ...)
+        continue
+```
+
+This catch is broad (`except Exception`), so the OSError from
+persist failure is caught and the loop moves on. The bot does NOT
+crash; it continues with diverged state until the next
+reconciliation pass adopts broker truth. The CRITICAL alert is the
+only operator-facing signal of the divergence.
+
+This is a small mismatch between the H1 fix's stated intent ("crash
+the bot so the supervisor restarts cleanly") and the actual
+outcome ("alert and keep running"). Two acceptable resolutions:
+
+1. **Update the inline comment** (executor.py:341-353) to reflect
+   actual behavior: "re-raise the original persistence error so the
+   caller (BotLoop) can log it; the bot continues running and the
+   next reconciliation pass will adopt broker truth — the CRITICAL
+   alert is the operator's signal to manually reconcile."
+2. **Tighten BotLoop's catch** in `_run_sl_evaluation` to NOT
+   swallow OSError (or any "STATE DIVERGED" exception): convert it
+   into a `request_shutdown(reason="amend persist failure ...")` so
+   the supervisor actually restarts.
+
+Option 1 is the minimal change. Option 2 changes behaviour and
+should be a separate decision. Either way, the operator-visibility
+goal is met; the "crash" goal is not currently met.
+
+**Verification-claim correction (NOT a finding):** the re-review
+prompt said "logger.critical with exc_info=True so traceback hits
+the scrubbing filter from commit 2a." The token-scrub filter from
+commit 2a is scoped to `alerts.*` loggers (per
+`_SCRUBBED_LOGGER_NAMES` in `src/alerts/__init__.py`). The
+executor's logger is `execution.executor` and is NOT covered by the
+filter. In practice this is fine: an OSError stack trace from
+`PositionsState.save_if_dirty` has no Telegram token to leak. But
+the verification claim was inaccurate. Worth knowing for future
+phases that introduce new sensitive paths outside `alerts.*`.
+
+### M1 — APPROVED
+
+**`src/bot/loop.py:115-122` (the cap), `:1146-1161`
+(`_record_recent_close`):**
+
+```python
+_RECENT_CLOSES_MAX = 200
+
+def _record_recent_close(self, deal_id: str, info: dict) -> None:
+    self._recent_closes[deal_id] = info
+    while len(self._recent_closes) > _RECENT_CLOSES_MAX:
+        oldest = next(iter(self._recent_closes))
+        del self._recent_closes[oldest]
+```
+
+Correct implementation: insert-first-then-prune means the dict
+size never grows beyond `cap` because at most one entry exceeds the
+cap per insert. `next(iter(...))` returns the oldest insertion-
+ordered key (Python 3.7+ dict ordering is part of the language
+spec). The `while` loop guards against the (rare) case where the
+dict was somehow loaded already over-cap; in normal steady state it
+executes 0 or 1 iterations.
+
+**Subtle (not a finding):** a re-insert of an existing `deal_id`
+does NOT change the entry's insertion position (Python dict
+semantics: update-in-place preserves order). So a hypothetical
+duplicate force-close on the same deal_id would not refresh the
+entry's "newness" for prune purposes. In practice deal_ids are
+unique broker references, so this doesn't matter — but the
+implementation does *not* implement "LRU"; it's strictly FIFO by
+first insertion.
+
+**Test coverage:**
+
+- `test_recent_closes_capped_at_max_with_oldest_pruned` inserts
+  `cap + 50` entries and verifies:
+  - Final size == cap ✓
+  - `DEAL_00000` and `DEAL_00049` (first 50) pruned ✓
+  - `DEAL_00050` is the first survivor ✓
+  - `DEAL_{cap + 49:05d}` is the newest entry ✓
+
+The single-test covers the multi-prune scenario. It does NOT
+separately verify:
+
+- Exact-at-cap state (no prune fires when size == cap).
+- One-over-cap state (one prune fires when size == cap + 1).
+
+The cap+50 test implicitly exercises both (the prune fires 50 times
+across the insertions) but a future regression that, say, made the
+`while` loop fire when `size == cap` (off-by-one error) would slip
+past this test as long as the post-condition holds.
+
+**Suggested follow-up (not a blocker):** add boundary tests:
+
+```python
+def test_recent_closes_at_cap_does_not_prune(...) -> None:
+    for i in range(cap):
+        bot._record_recent_close(f"DEAL_{i:05d}", {...})
+    assert len(bot._recent_closes) == cap
+    assert "DEAL_00000" in bot._recent_closes  # nothing pruned yet
+
+def test_recent_closes_one_over_cap_prunes_oldest(...) -> None:
+    for i in range(cap):
+        bot._record_recent_close(f"DEAL_{i:05d}", {...})
+    bot._record_recent_close(f"DEAL_{cap:05d}", {...})  # cap+1
+    assert len(bot._recent_closes) == cap
+    assert "DEAL_00000" not in bot._recent_closes  # first pruned
+    assert "DEAL_00001" in bot._recent_closes      # second survives
+```
+
+Three tests instead of one, with explicit boundary semantics.
+Strictly optional; current coverage is sufficient.
+
+**Concurrency note (not a finding for 2b):** `_record_recent_close`
+and the `_recent_closes.pop(deal_id, None)` in `_reconcile_once`
+both run on the LS reader thread (single writer per the current
+call chain). No `prune-while-iterate` race in 2b. If a future
+healthcheck/heartbeat thread also writes to `_recent_closes`, this
+would need a lock — but that's a v2 concern.
+
+### M2 — PARTIALLY APPROVED
+
+The deeper rewrite at `src/bot/loop.py:1280-1301` is excellent:
+
+```python
+# Suppressed at the alerts boundary (each for a different
+# reason — the prior comment lumped them as "INFO-suppressed"
+# which was wrong: STALE_POSITION and SL_DRIFT_LARGE carry
+# WARNING severity at the reconciler):
+#   OK_NO_OP (INFO)        — true no-op, no alert needed.
+#   SL_UPDATED_FROM_BROKER (INFO) — handled internally; ...
+#   STALE_POSITION (WARNING) — informational. Long-open
+#     positions are flagged in the local jsonl log; an alert
+#     per pass would be noise ...
+#   SL_DRIFT_LARGE (WARNING) — handled internally. ...
+#   AMEND_FAILED — emitted by the Executor at the call site ...
+```
+
+This addresses the M2 finding correctly at the canonical location
+(`_reconciliation_event_to_alert`). The per-kind justification is
+the right depth for future maintainers.
+
+**BUT two other locations still carry the misclassification:**
+
+1. **`src/bot/loop.py:746-750`** (the `_maybe_reconcile` inline
+   comment) **still says:**
+
+   ```python
+   # Dispatch alerts only after applying actions so the
+   # operator sees the same view the bot acted on. INFO-level
+   # reconciliation events (OK_NO_OP, SL_UPDATED_FROM_BROKER,
+   # STALE_POSITION, SL_DRIFT_LARGE) are suppressed; only the
+   # operator-actionable kinds translate to alerts.
+   ```
+
+   This is the *exact* misclassification the M2 finding flagged.
+   It was left unchanged.
+
+2. **`src/bot/loop.py:1223-1225`** (the
+   `_dispatch_reconciliation_alerts` docstring) says:
+
+   ```python
+   ``OK_NO_OP``, ``SL_UPDATED_FROM_BROKER``, ``STALE_POSITION``,
+   ``SL_DRIFT_LARGE`` are suppressed — informational for the
+   local log only.
+   ```
+
+   The phrase "informational for the local log only" is ambiguous —
+   it can be read as severity-class INFO (the original mistake) or
+   as "this is just informational" (the intended sense). Less wrong
+   than location 1, but still imprecise alongside the now-correct
+   per-kind comment 50 lines below.
+
+The CODE is correct; only the docstring/comment edges are
+inconsistent. Severity remains MEDIUM (documentation-hygiene) — but
+demoted from "blocker" to "small follow-up" since the canonical
+location is correct.
+
+**Suggested follow-up:**
+
+- Location 1: replace with "Dispatch alerts for the four
+  operator-actionable kinds only (POSITION_CLOSED, BROKER_ORPHAN,
+  MISSING_LOCAL_KEPT, MANUAL_SL_MOVE). See
+  `_reconciliation_event_to_alert` for the per-kind suppression
+  rationale."
+- Location 2: replace "informational for the local log only" with
+  "suppressed at the alerts boundary — see
+  `_reconciliation_event_to_alert` for per-kind rationale (the
+  WARNING-severity STALE_POSITION and SL_DRIFT_LARGE are
+  intentionally suppressed because they re-fire every pass)."
+
+### AMEND_PERSIST_FAILED + CRITICAL bypass — concurrent failure observation
+
+The prompt asked: "if 5 positions all hit persist failure
+simultaneously (e.g., disk truly full), 5 separate Telegram
+messages. Acceptable?"
+
+**Verdict: yes, acceptable.** The reasoning:
+
+1. CRITICAL is reserved for genuine bot-stopping conditions
+   (`src/alerts/types.py:15-19`). 5 concurrent state divergences IS
+   a bot-stopping condition — operator needs to know about each
+   diverged position to reconcile manually.
+2. The alerter has internal exception isolation; if Telegram fails
+   on alert 3 of 5, alerts 4 and 5 still attempt to ship.
+3. Each `_alerter.send` for a CRITICAL is a synchronous Telegram
+   POST with a 5s timeout (`ALERTS_HTTP_TIMEOUT_SEC`). 5 sends in
+   sequence worst-case is 25 seconds. During that 25s the LS
+   reader thread is blocked inside `_run_sl_evaluation`. Acceptable
+   tradeoff for the operator-visibility goal.
+4. Coalescing 5 different `(category=TRADE, event_subtype=
+   AMEND_PERSIST_FAILED, pair, severity=CRITICAL)` keys: if all 5
+   are different pairs, they don't share a coalesce key
+   (`(category, event_subtype, pair, severity)`). If 2 share a
+   pair, they would normally coalesce within a window — but
+   CRITICAL bypasses coalescing per the prefix-sweep design. Five
+   sends.
+
+**Real concern (NOT a finding for 2b):** the 25s blocking-window
+on the LS reader thread for 5 concurrent persist failures. In
+practice, disk-full failures hit all positions in the same
+`_run_sl_evaluation` pass within milliseconds of each other. The
+blocking sends serialize. If a sixth position needs an amend
+during this window, it queues behind. BAR_CLOSE events stack up at
+the FeedManager. Eventually the FeedManager's buffer fills and
+events are dropped. **But:** this is the worst-case scenario; the
+operator has already received CRITICAL alerts and can intervene.
+Worth flagging as a Phase 10+ consideration ("dedicated alerter
+worker thread") but out of scope for commit 2b.
+
+### Deferred items (M3, M4, M6, M7, L1–L5)
+
+| Item | Status now | Should have been addressed in this fix pass? |
+|------|-----------|----------------------------------------------|
+| M3 (degraded-pairs in STARTUP) | Unchanged | No — UX polish, not a correctness blocker for H1/M1/M2. |
+| M4 (FEED_STALE ordering test) | Unchanged | No — test-quality improvement. |
+| M6 (tick-after-close observability) | Unchanged | No — independent observability gap. |
+| M7 (`_git_short_hash` double-call) | Unchanged | No — micro-optimisation. |
+| L1 (STARTUP test structural assertion) | Unchanged | No. |
+| L2 (`datetime.now` in `_emit_*_alert`) | Unchanged | No. |
+| L3 (no git tag detection) | Unchanged | No. |
+| L4 (`_RecordingAlerter` doesn't enforce contract) | Unchanged | No. |
+| L5 (no-alerter mode test coverage gap) | Unchanged | No. |
+
+None of the deferred items escalated to blocker status. None became
+materially worse with the H1/M1/M2 fixes in place.
+
+### Spec walkthrough deltas vs original review
+
+| Spec item | Original status | Updated status |
+|-----------|----------------|----------------|
+| AMEND_FAILED on broker-accepted-but-persist-failed | ✗ (H1) | **✓** (H1 fix lands; new AMEND_PERSIST_FAILED CRITICAL event) |
+| `_recent_closes` deal log cleanup | ✗ (M1) | **✓** (M1 fix bounds growth) |
+| Comment classification of STALE_POSITION / SL_DRIFT_LARGE | ✗ (M2) | **partial** (canonical location fixed; 2 other comment locations still misleading) |
+
+All other rows from the original spec walkthrough remain ✓.
+
+### Final recommendation
+
+**APPROVE FOR MERGE.**
+
+Commit `65bf751` lands H1 (correct, with a small design-doc
+mismatch on "crash vs alert-and-continue" — see Design note above)
+and M1 (correct, test slightly thin on boundary cases but
+adequate). M2 is partially landed: the canonical location at
+`_reconciliation_event_to_alert` is correctly rewritten; two
+peripheral comment locations still carry the misclassified
+language. The CODE behaviour is correct in all three M2 locations
+— this is documentation hygiene, not a correctness issue.
+
+843 tests pass, 0 warnings, branch state is clean (commit boundary
+exists for bisect/rollback). The H1 fix has been verified
+empirically: CRITICAL `AMEND_PERSIST_FAILED` ships synchronously
+before the OSError propagates, and the no-alerter variant still
+re-raises so the architectural contract holds.
+
+**Recommended merge path:** `feature/alerts-integration` →
+`develop` via `--no-ff`. After merge, a single follow-up cleanup
+commit on `develop` can bundle:
+
+- M2 comment fix at the two remaining locations (~6 lines).
+- The H1 inline-comment update (option 1 from the Design note —
+  reflect actual "alert-and-continue" behaviour).
+- M3, M4, M6, M7, L1–L5 from the original review.
+- The optional M1 boundary tests.
+
+This is the same workflow used for Phase 7 / Phase 8 cleanup
+commits and matches the established codebase pattern.
