@@ -638,3 +638,163 @@ the CRITICAL prefix-match fix is correct and tested, M2 clock-skew
 defence is well-implemented, M5 control-char sanitisation works
 (modulo DEL), L5 send-after-close gating is clean. Once H1 and M1
 land, this is a clean APPROVE FOR MERGE.
+
+---
+
+## Re-review addendum — 2026-05-15 (commit `9f68428`)
+
+Final pass after the H1 + M1 fixes from this review's "APPROVE WITH
+CONDITIONS" verdict. The cleanup pass and the H1/M1 fixes landed as
+a single commit (`9f68428`) on `feature/alerts-integration` —
+correctly bundled with the prior commit 1 review's M1-M5/L1-L5/N1
+cleanup that was previously uncommitted (resolving the original P1
+finding). Full suite: **812 passed, 0 warnings** (matches expected).
+
+### H1 — APPROVED
+
+**`src/alerts/__init__.py:95-125`** — the filter now has three scrub
+paths:
+
+1. **Path 1 (formatted message)** — unchanged from prior pass.
+2. **Path 2a (already-rendered traceback)** — if `record.exc_text`
+   is already populated (some handler ran first), scrub in place.
+3. **Path 2b (lazy traceback)** — if `record.exc_info` is set and
+   `record.exc_text` is not yet rendered, eagerly call
+   `logging.Formatter().formatException(record.exc_info)`, scrub
+   the result, and assign back to `record.exc_text`. Per CPython
+   `logging.Formatter.format`, any later handler that checks
+   `if record.exc_info and not record.exc_text:` will see exc_text
+   already set and reuse the scrubbed cached value.
+
+Empirical verification I ran:
+
+- **Old filter (Path 1 only) with the new test scenario** → traceback
+  leaks `LEAK_VIA_TRACEBACK` to the handler output. Test would fail.
+  Verified by reconstructing the prior filter inline and exercising
+  `logger.exception` on a `requests.exceptions.ConnectionError`
+  carrying the token in its message:
+  ```
+  Traceback (most recent call last):
+    ...
+  requests.exceptions.ConnectionError: url: /bot12345:LEAK_VIA_TRACEBACK/sendMessage
+  ```
+- **New filter** → same scenario produces
+  `requests.exceptions.ConnectionError: url: /bot<redacted>/sendMessage`
+  in both `record.exc_text` and downstream handler output. The test
+  `test_token_scrubbed_from_exception_traceback` exercises this
+  end-to-end via the real `requests.exceptions.ConnectionError`
+  class — a faithful regression for the original H1 attack surface.
+
+**Test quality:** the H1 test asserts on `record.getMessage() + " " +
+(record.exc_text or "")` and additionally checks that `<redacted>`
+appears in `exc_text` when set. Both halves of the contract are
+nailed — a future regression that re-introduces leakage in either
+the message body OR the traceback path will trip the test. The use
+of the real `requests.exceptions.ConnectionError` (not a synthetic
+exception class) anchors the test to the original threat model.
+
+**One subtle behaviour change worth noting (not a bug, just a
+semantic shift):** by eagerly rendering exc_info to exc_text at
+filter time, any handler with a custom `Formatter.formatException`
+override is silently bypassed for `alerts.*` loggers — the cached
+`exc_text` short-circuits re-rendering. Inside this codebase there
+are no such custom formatters, but if Phase 10+ wires up a
+structured-log handler that wants to format exceptions differently,
+it will need to either bypass `record.exc_text` or operate on the
+already-scrubbed text. Worth a one-line note in the filter docstring
+for future maintainers.
+
+### M1 — APPROVED
+
+**`src/alerts/formatter.py:69-91`** — `_format_timestamp_suffix` now
+takes `Optional[datetime]` directly (refactored from `Alert`) and
+applies the conversion:
+
+```python
+if timestamp.tzinfo is not None:
+    utc_ts = timestamp.astimezone(timezone.utc)
+else:
+    utc_ts = timestamp
+return f" ({utc_ts.strftime('%H:%M:%S')} UTC)"
+```
+
+Empirical probe of the four shape cases:
+
+| Input | Output |
+|-------|--------|
+| 10:00 EST (UTC-5)        | ` (15:00:00 UTC)` |
+| 13:00 naive              | ` (13:00:00 UTC)` |
+| 13:00 tz-aware UTC       | ` (13:00:00 UTC)` |
+| `None`                   | `""` (empty) |
+| 01:00 JST (UTC+9)        | ` (16:00:00 UTC)` (date rolled back; only HH:MM:SS surfaces) |
+
+Three tests cover the three contracted shapes
+(`test_timestamp_with_non_utc_tz_converts_to_utc`,
+`test_timestamp_naive_assumed_utc`,
+`test_timestamp_already_utc_unchanged`). The pre-existing
+`test_format_single_omits_timestamp_when_absent` covers the `None`
+case. Coverage is complete.
+
+The signature change from `(alert)` to `(timestamp)` is contained
+within `formatter.py` — the only two callers (`format_single` line
+111, `format_batch` header line 144) were updated; no external
+callers since the helper is module-private (`_`-prefixed).
+
+### New bugs introduced by the fixes — none observed
+
+- The H1 filter's eager render uses the default
+  `logging.Formatter()` with no format string; this only affects how
+  `formatException` walks the traceback, which is the same code path
+  any handler's formatter would take. No observed regression in
+  caplog records, handler ordering, or downstream `format()` behaviour.
+- The M1 signature change is in-module and the two call sites are
+  updated. Grep confirms zero external references to
+  `_format_timestamp_suffix`.
+- 812 passed, 0 warnings — no regressions in adjacent test files.
+
+### Deferred items from the commit 2a review (M2-M5, L1-L5, P1)
+
+| Item | Should have stayed deferred? | Notes |
+|------|------------------------------|-------|
+| M2 (tick-after-close observability gap) | yes | Pure observability polish; integration in commit 2b is the natural place. |
+| M3 (em-dash audit incomplete in `coalescer.py` docstrings) | yes | Docstring-only, not log-visible. Spot-check confirms log strings are clean. |
+| M4 (filter doesn't auto-install for future submodules) | yes | Process risk, not a current bug. A new `alerts.*` module without registration is a future-maintenance concern, not a regression for this commit. |
+| M5 (DEL `0x7F` survives sanitiser) | yes, **just barely** | Re-checked: DEL is not an ANSI escape vector and Telegram clients render it as `?` or nothing. The original docstring says "ASCII control chars" — DEL technically qualifies. A one-character regex fix would close the gap, but it's not blocking. Suggest landing in commit 2b's polish bundle. |
+| L1 — filter doesn't scrub non-string `args` | yes | Defensive but partial; pre-formatting via `getMessage()` covers the realistic surface. |
+| L2 — `_truncate_for_log` off-by-three boundary | yes | Standard `…` truncation pattern. |
+| L3 — DEBUG log fires during close-drain | yes | Suppressed in production. |
+| L4 — coalescer `close()` semantics on `tick()`/`drain_all()` | yes | Docstring polish. |
+| L5 — `_DELIVERY_LOG_MAX_LEN` vs `_MAX_TEXT_LOG_LEN` magic numbers | yes | Constants unification is a cosmetic refactor. |
+| P1 — uncommitted branch state | **RESOLVED** | Commit `9f68428` now exists on `feature/alerts-integration`. |
+
+None of the deferred items rise to "should not have been deferred".
+M5 (DEL) is the closest call but is mitigated by the fact that DEL
+is not part of the original M5 threat model (ANSI escapes, bell char,
+nulls) — it's a documentation-contract gap, not an exploitable one.
+
+### Spec-walkthrough deltas vs original review
+
+| Item | Original status | Updated status |
+|------|-----------------|----------------|
+| L1 — timestamp surfacing (timezone correctness) | partial (M1 raised) | **✓** (M1 fix lands) |
+| N1 — token-scrub filter (exc_text coverage)     | partial (H1 raised) | **✓** (H1 fix lands) |
+| M5 — control-char sanitisation                  | partial (DEL)       | partial (DEL — deferred) |
+
+All other rows from the original Spec walkthrough remain ✓.
+
+### Final recommendation
+
+**APPROVE FOR MERGE.**
+
+Commit `9f68428` lands H1 + M1 cleanly, with regression tests for
+each, no observed new bugs, and the deferred MEDIUM/LOW items
+correctly scoped to commit 2b's integration pass. The full suite is
+green at 812 tests. The token-scrub filter now covers the realistic
+attack surface (`logger.exception` carrying a `requests`-level
+`ConnectionError`), and the formatter timestamp suffix is timezone-
+correct.
+
+Recommended merge path: `feature/alerts-integration` → `develop`
+via `--no-ff`. After merge, commit 2b should begin with the deferred
+M5-DEL one-line and M2/M3/M4/L1-L5 polish bundle before adding the
+Phase 6/7/8 integration call sites.
