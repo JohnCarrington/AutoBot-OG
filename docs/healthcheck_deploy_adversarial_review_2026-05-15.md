@@ -645,3 +645,288 @@ matches Phase 9's MODULE.md standard.
 
 926 tests pass, zero warnings, branch state is straightforward to
 land via `--no-ff` once H1 + H2 are addressed.
+
+---
+
+## Re-review addendum — 2026-05-15 (commit `6555a9d`)
+
+Final pass after the H1 + H2 + M5 fixes from this review's "APPROVE
+WITH CONDITIONS" verdict. The fixes landed as a single commit
+(`6555a9d`) on `feature/healthcheck-deploy`. Full suite:
+**934 passed, 0 warnings** (matches expected target of 926 + 8 new
+tests). Working tree clean — P1 (commit hygiene) resolved.
+
+### H1 — APPROVED
+
+Two-layer implementation, both layers verified.
+
+**Layer 1** (`src/bot/main.py:122-140`):
+
+```python
+if shadow_mode:
+    existing = bot.position_manager_for_startup_check().all()
+    if existing:
+        deal_ids = [p.deal_id for p in existing]
+        msg = (
+            f"Cannot start in SHADOW_MODE with {len(existing)} "
+            f"existing position(s): {deal_ids}. ..."
+        )
+        logger.critical(msg)
+        _emit_startup_aborted_alert(
+            alerter=alerter, message=msg, deal_ids=deal_ids,
+        )
+        alerter.close()
+        return EXIT_ABORT
+```
+
+- `shadow_mode=True` + positions present → CRITICAL log,
+  `STARTUP_ABORTED` alert dispatched, `alerter.close()` for
+  drain, returns `EXIT_ABORT = 3`. Test
+  `test_bot_main_refuses_to_start_in_shadow_mode_with_existing_positions`
+  pins all four side effects (exit code, alert subtype, severity,
+  CSV deal_ids in body, alerter closed).
+- `shadow_mode=True` + zero positions → guard passes silently;
+  bot proceeds to hydrate. Test
+  `test_shadow_mode_clean_startup_with_no_positions` confirms the
+  exit code is NOT `EXIT_ABORT` and no `STARTUP_ABORTED` alert is
+  emitted (stubs hydrate to raise so the test terminates cleanly
+  with the hydration-failure exit path).
+- `shadow_mode=False` + positions present → guard is gated by
+  `if shadow_mode:` so the existence check never runs. Live-mode
+  startup is unaffected by design. No explicit test for this case,
+  but the gate's structure makes a regression impossible without
+  changing the guard's signature.
+
+**Edge case (`.all()` raising):** the exposed method
+`PositionManager.all()` returns `self._state.values()` — pure
+in-memory dict iteration, no IO, no parsing. The IO-and-parse
+phase (`PositionManager.load_from_path`) runs earlier inside
+`_build_runtime` and any failure there is caught by the outer
+`try/except` at main.py:106-111 → returns 1 (never reaches the
+guard). So `.all()` can only realistically raise on a programming
+bug, not on real-world disk state. The guard is not wrapped in
+`try/except` — acceptable; an unhandled exception here would crash
+startup with a traceback, which is the correct outcome for an
+internal invariant violation.
+
+**Layer 2** (`src/bot/loop.py:874-888` for force-close,
+`:1067-1080` for amend, `:1326-1368` for `_emit_shadow_guard_blocked`):
+
+- `_run_sl_evaluation` with `shadow_mode=True` and a position
+  needing amend → `executor.apply_amend` is NOT called;
+  `SHADOW_GUARD_BLOCKED` WARNING alert emitted with
+  `operation="apply_amend"`. Test
+  `test_apply_amend_skipped_in_shadow_mode_with_warning_alert` pins
+  empty `executor.amended`, alert severity WARNING, category SYSTEM,
+  body contains operation + deal_id, debug payload's `operation`
+  field.
+- `_execute_force_close` with `shadow_mode=True` →
+  `ig.close_position` is NOT called; no TRADE_CLOSED alert, no
+  `_recent_closes` entry; `SHADOW_GUARD_BLOCKED` WARNING alert
+  emitted with `operation="force_close"`. Test
+  `test_force_close_skipped_in_shadow_mode_with_warning_alert` pins
+  all four side effects.
+- Negative case: `shadow_mode=False` + force-close runs normally —
+  real broker call, TRADE_CLOSED alert, no SHADOW_GUARD_BLOCKED
+  alert. Test `test_force_close_normal_mode_with_position_still_works`
+  pins this.
+
+The "layer-1 should have prevented reaching here" wording in both
+the log line and the alert body is clear enough for an operator to
+know what to investigate. The mental model — layer 1 in `bot.main`
+is the production refusal, layer 2 in `BotLoop` is the
+defense-in-depth in case tests, future refactors, or direct BotLoop
+construction bypass layer 1 — is explicitly stated in both the
+inline comments and the `_emit_shadow_guard_blocked` docstring.
+
+### H2 — APPROVED
+
+**`deploy/systemd/autobot-og-healthcheck.service:21-28`:**
+
+```
+[Service]
+...
+TimeoutStartSec=120
+# H2 (Phase 10 review): the healthcheck's exit-code semantic is
+# 0 = all checks pass, 2 = warn (first-run state files absent — no
+# Telegram alert, just operator awareness), 1 = hard failure (CRITICAL
+# alert dispatched). systemd's default treats every non-zero exit as
+# failed; whitelisting 2 keeps `systemctl is-failed` returning success
+# on the warn path so monitoring tooling (OnFailure= cascades, uptime
+# probes) doesn't false-fire on every weekday warn run.
+SuccessExitStatus=0 2
+```
+
+- Directive placement: under `[Service]`, after `TimeoutStartSec` —
+  correct systemd unit-file structure. The comment immediately
+  above explains both the exit-code semantic and the operational
+  consequence (false weekday OnFailure alerts).
+- Test `test_healthcheck_service_unit_declares_success_exit_status`
+  reads the actual `.service` file content via
+  `Path(repo_root / "deploy" / "systemd" / "autobot-og-healthcheck.service").read_text()`
+  — not a stub or template. A removed/renamed/typo'd directive
+  would trip the test. The failure message names the directive
+  verbatim and points to this review doc for the rationale.
+
+The assertion is a substring match rather than a parsed-config
+match — a comment containing "SuccessExitStatus=0 2" would also
+satisfy the assert. Acceptable for a one-line directive (systemd
+parses the file the same way the test does; both ignore commented
+lines). A future refactor that moves the directive into a drop-in
+override file would slip past this, but that's not a current risk.
+
+### M5 — APPROVED
+
+Both tests pin the wiring:
+
+- `test_build_runtime_threads_shadow_mode_to_bot_loop` —
+  monkeypatches every collaborator (`create_ig_service`, `IGClient`,
+  `PositionManager.load_from_path`, `RegimeEngine`, `RiskGuard`,
+  `Executor`, `FeedManager.from_pairs`) plus a `_RecordingBotLoop`
+  that captures kwargs. Asserts `shadow_mode=True` propagates.
+- `test_build_runtime_default_shadow_mode_is_false` — same fixture
+  without the kwarg; asserts the default propagates as `False`.
+
+**Could a future refactor still lose the parameter?** The test
+captures BotLoop's actual `**kw` so any rename or removal of the
+`shadow_mode` keyword on either side trips the test. The only way
+to silently lose the parameter and keep these tests green is a
+refactor that introduces a new boolean kwarg also named
+`shadow_mode` that doesn't actually drive behaviour — which would
+be a meaningful semantic refactor that should trigger reviewer
+attention regardless. Defense is adequate.
+
+### New event subtypes — APPROVED
+
+**`src/alerts/types.py:73-93`** lists `STARTUP_ABORTED` and
+`SHADOW_GUARD_BLOCKED` in `EVENT_SUBTYPES`. The module docstring at
+lines 7-29 lists both in the appropriate severity sections:
+
+- CRITICAL → `STARTUP_ABORTED` ("Phase 10 H1 layer 1" with the
+  cross-reference to this review).
+- WARNING → `SHADOW_GUARD_BLOCKED` ("Phase 10 H1 layer 2 —
+  defense-in-depth" with the rationale).
+
+`test_event_subtypes_includes_locked_set` already covers both new
+subtypes (the set-equality assertion would have caught any missing
+entry; full suite confirms green).
+
+### RUNBOOK section 3 — APPROVED
+
+**`deploy/RUNBOOK.md:107-160`:**
+
+- Zero-position pre-requisite stated up front (lines 115-123) with
+  the explicit "SHADOW_MODE only intercepts new opens" reasoning.
+- Concrete shell commands for verification (lines 127-147): IG
+  REST call to fetch open positions, `cat data/execution/positions.json`,
+  `rm` for cleanup.
+- Sample `STARTUP_ABORTED` Telegram body shown verbatim (lines
+  152-157) — operator recognizes the abort instantly.
+- Contract clearly stated: "the SHADOW_MODE intercept is narrow"
+  plus the explicit list of alerts that will NOT fire in shadow
+  mode (lines 192-194).
+- Validation checklist gives concrete acceptance criteria.
+
+Operator-friendly documentation at the same quality as the prior
+RUNBOOK sections.
+
+### New bugs from the fixes — none observed
+
+1. **Layer-1 false positive on stale state:** guard is gated by
+   `if shadow_mode:`; live-mode startup is unaffected by design. ✓
+2. **Layer-2 alert spam on stale position:** empirically verified
+   via a live AlertCoalescer probe:
+   - SHADOW_GUARD_BLOCKED's coalesce key is
+     `(SYSTEM, SHADOW_GUARD_BLOCKED, pair, WARNING)`.
+   - Three alerts within the 30s window coalesce into one batch of
+     three (verified with the live coalescer; pending grows to 3,
+     tick after window expiry flushes them as a single batch).
+   - BAR_CLOSE fires every 5 minutes (300s ≫ 30s window), so each
+     bar's alert becomes its own group. Operator sees one alert per
+     BAR_CLOSE per stale position when an amend would have fired —
+     bounded, not spam-tier.
+   - SL amend doesn't fire on every BAR_CLOSE in practice (only
+     when the SL needs adjusting). Worst case ≈ 12 alerts/hour for
+     a continuously trending stale position — still bounded;
+     operator gets continuous "something is wrong" reminders until
+     they fix the layer-1 bypass.
+3. **`.all()` raising on guard entry:** unreachable in real
+   deployments (see Layer-1 edge case above). A programming bug
+   here surfaces as a startup traceback, which is the correct
+   outcome.
+
+### Test-quality observations
+
+- **Both layer-2 tests assert positively** (alert happened) AND
+  **negatively** (broker call did NOT happen, no spurious alerts,
+  no deal-log entry). Right shape — Phase 8's C1/C2 lessons
+  applied.
+- **Layer-1 negative test stubs `hydrate` to raise** so the test
+  terminates cleanly while still proving the guard didn't fire.
+  Creative — exercises the post-guard codepath without needing to
+  mock the full LS lifecycle. The `code != EXIT_ABORT and code == 1`
+  assertion pins that the failure path is the hydration one.
+- **H2 test reads the real file content** rather than a fixture —
+  catches a directive removal directly. A `configparser`-parse
+  version would survive whitespace refactors but the substring
+  match is adequate for this single directive.
+- **M5 tests use a `_RecordingBotLoop`** that captures `**kw` —
+  the right test shape. A regression that drops the kwarg fails at
+  the BotLoop construction (`KeyError` on `kw["shadow_mode"]`).
+- **No layer-2 test for the apply_amend negative case**
+  (`shadow_mode=False` explicitly in apply_amend) — but the
+  executor test suite from commit 2b covers the live amend path.
+  Acceptable.
+
+### Deferred items — none escalated
+
+| Item | Should NOT have been deferred? |
+|------|-------------------------------|
+| M1 (no-op alerter swallows healthcheck CRITICAL) | No — observability degradation only; bot still exits the correct code. |
+| M2 (IG session leak in `check_ig_auth`) | No — per-run minor resource consumption; healthcheck runs daily. |
+| M3 (journalctl_errors threshold = 20 calibration) | No — calibration is post-deployment empirical work. |
+| M4 (no bot service status check inside healthcheck) | No — separate concern (systemd status can be monitored independently). |
+| L1–L8 | No — polish. |
+
+None of the deferred items escalated. M2 (IG session leak) is the
+closest to actually mattering in production but at one extra TCP
+connection per daily healthcheck run, it's a slow leak that a
+supervisor's daily restart cycle would clear. Acceptable to defer.
+
+### Spec walkthrough deltas vs original review
+
+| Item | Original status | Updated status |
+|------|----------------|----------------|
+| SHADOW_MODE intercepts all broker calls (open/amend/close) | ✗ (H1: only open) | **✓** (two-layer fix lands; amend + close gated) |
+| `systemctl is-failed` returns success on warn exit | ✗ (H2) | **✓** (SuccessExitStatus=0 2 directive added) |
+| `_build_runtime` threads `shadow_mode` to BotLoop | untested (M5) | **✓** (positive + negative test) |
+| RUNBOOK §3 documents zero-position pre-requisite | unclear | **✓** (concrete commands + sample alert) |
+
+All other rows from the original spec walkthrough remain ✓.
+
+### Final recommendation
+
+**APPROVE FOR MERGE.**
+
+Commit `6555a9d` lands H1 (both layers, with the layer-2 defense
+correctly emitting `SHADOW_GUARD_BLOCKED` on both the amend and
+close paths and the layer-1 abort returning the dedicated
+`EXIT_ABORT = 3` exit code), H2 (the `SuccessExitStatus=0 2`
+directive plus a test reading the real file content), and M5
+(positive + negative parameter-threading tests). The two new event
+subtypes are correctly catalogued. The RUNBOOK section 3 rewrite
+is comprehensive and operator-friendly.
+
+934 tests pass, 0 warnings, branch state is clean (commit boundary
+exists for bisect/rollback). The five new fix-tests pass plus the
+three new test files contribute many additional passing tests.
+
+**Recommended merge path:** `feature/healthcheck-deploy` →
+`develop` via `--no-ff`. After merge, a single follow-up cleanup
+commit on `develop` can bundle M1, M2, M3, M4, and L1–L8 — same
+workflow as the Phase 9 commit-2a / 2b cleanups.
+
+This concludes Phase 10. The bot is ready for production deployment
+following the RUNBOOK procedure (provision droplet → install systemd
+units → enable healthcheck timer → start in `BOT_SHADOW_MODE=true`
+for 24-48h observation → flip to live).
