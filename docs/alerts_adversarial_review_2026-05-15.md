@@ -481,3 +481,197 @@ provably correct, the formatter's truncation count is right,
 the three-layer exception isolation works in practice, and the
 no-op fallback removes a class of dev-environment papercuts.
 Once H1 lands, this is a clean APPROVE FOR MERGE.
+
+---
+
+# Addendum — re-review pass on `feature/alerts` @ `bc4b790`
+
+- **Branch reviewed:** `feature/alerts` @ `bc4b790` — H1 fix on top of
+  the original `97617a3`.
+- **Date:** 2026-05-15.
+- **Reviewer:** AutoBot-OG (read-only verification pass).
+- **Test status:** `778 passed in 4.07s` — full suite green, matches
+  the commit claim (776 + 2 new).
+
+## Disposition of H1
+
+**FIXED.** `_TOKEN_PATTERN = re.compile(r"/bot[^/]+/")` plus
+`_scrub_exception_text(str(exc))` applied at the single
+exception-interpolation site in `TelegramClient.send`
+(`src/alerts/telegram_client.py:111-121`). Two regression tests
+pin the behaviour:
+
+- `test_token_not_leaked_in_exception_log` — synthetic
+  `ConnectionError` with a token-bearing URL, asserts the token
+  is absent and `<redacted>` is present in the captured log.
+- `test_scrub_does_not_alter_non_token_content` — documents the
+  acceptable false-positive surface (any path segment of the
+  form `/bot<non-slash>/` is redacted regardless of whether it's
+  the Telegram URL).
+
+## Verifications
+
+### 1. `_TOKEN_PATTERN` correctness — empirical sweep
+
+I ran 8 representative inputs through `_scrub_exception_text`:
+
+| Input shape | Outcome |
+|-------------|---------|
+| `HTTPSConnectionPool(...): Max retries exceeded with url: /bot{T}/sendMessage (Caused by …)` | `/bot<redacted>/` — clean ✓ |
+| `Read timed out. (read timeout=5)` (no URL) | unchanged, no false positive ✓ |
+| `NewConnectionError('…url=/bot{T}/sendMessage')` | redacted ✓ |
+| `/bot{T}/sendMessage then again /bot{T}/sendMessage` (two occurrences) | both redacted ✓ |
+| `'/bot{T}/sendMessage'` (quoted) | redacted ✓ |
+| `https://api.telegram.org/bot{T}/sendMessage` (host-prefixed) | redacted ✓ |
+| `path=/bot{T}/sendMessage&trace=x` (querystring-style) | redacted ✓ |
+| `/bot{T}/sendMessageHTTP` (no boundary after path) | redacted ✓ |
+
+Token-leak in none. Regex is tight on the standard request /
+urllib3 exception shape.
+
+### 2. Module-wide audit — only `telegram_client.py` had the leak
+
+`grep -n 'logger\.' src/alerts/*.py` returns 9 call sites:
+
+| File:line | Severity | Interpolated args | Token risk |
+|-----------|----------|-------------------|------------|
+| `alerter.py:109` | WARNING | env var **names** (`TELEGRAM_BOT_TOKEN_ENV`, `TELEGRAM_CHAT_ID_ENV`) | none — names not values |
+| `alerter.py:156` | EXCEPTION | `alert.event_subtype`, `alert.pair` | none — alert payload, no URL |
+| `alerter.py:178` | EXCEPTION | (no interp) | none |
+| `alerter.py:194` | EXCEPTION | (no interp) | none |
+| `alerter.py:213` | EXCEPTION | `len(batch)` | none |
+| `alerter.py:223` | EXCEPTION | (no interp) | **see N1 below** |
+| `telegram_client.py:115` | WARNING | scrubbed exception string + truncated text | FIXED |
+| `telegram_client.py:125` | WARNING | `status` (int) + truncated text | none |
+| `coalescer.py` | — | no log calls at all | n/a |
+| `formatter.py` / `types.py` / `constants.py` / `__init__.py` | — | no log calls | n/a |
+
+`constants.py` declares env var **names** as string constants and
+never reads the values; nothing logs them.
+
+### 3. Regression test exercises the bug path correctly
+
+```python
+bot_token = "12345:LIVETOKEN_DO_NOT_LEAK"
+fake_error_text = (
+    "HTTPSConnectionPool(host='api.telegram.org', port=443): "
+    f"Max retries exceeded with url: /bot{bot_token}/sendMessage "
+    "(Caused by NewConnectionError(...))"
+)
+...
+assert "LIVETOKEN_DO_NOT_LEAK" not in full_log
+assert "<redacted>" in full_log
+```
+
+Both halves matter: the absence assertion catches "scrub failed"
+and the presence-of-`<redacted>` assertion catches "scrub was a
+no-op because the regex didn't match" (so a future regex
+mis-edit can't pass silently).
+
+### 4. False-positive surface — documented and tested
+
+```python
+multi_path = "/api/v1/users/bot1234567:ABC/profile not a token"
+out = _scrub_exception_text(multi_path)
+assert "/bot<redacted>/" in out
+```
+
+The regex `^/bot[^/]+/` matches any path segment of that shape,
+not just the Telegram URL path. The test acknowledges this with an
+inline comment: *"Acceptable false-positive surface — the cost is
+just a redaction of an unrelated path. Verify the rule explicitly
+so reviewers know what's redacted."* That's the right trade-off:
+the false positive (over-redaction of unrelated URLs) is purely
+cosmetic; the false negative (under-redaction of a token-bearing
+URL) is the security risk.
+
+### 5. No new bugs introduced by the fix
+
+- The scrub is applied AFTER `str(exc)` so the type-name (`%s`
+  for `type(exc).__name__`) is unchanged.
+- The return path (`return False`) is unchanged.
+- The fast/happy path (status 2xx → True) doesn't touch
+  `_scrub_exception_text`.
+- The 4xx/5xx WARNING (`telegram_client.py:125`) doesn't carry
+  exception text, so no scrub needed there.
+
+## One new LOW finding
+
+### N1 (LOW — defense-in-depth) — `alerter.py:223` `logger.exception` would re-expose token if `TelegramClient.send` ever raises
+
+**File:** `src/alerts/alerter.py:218-223`
+
+```python
+try:
+    self._client.send(text)
+except Exception:
+    # TelegramClient.send already swallows; this is defense in
+    # depth in case a future change makes it raise.
+    logger.exception("TelegramClient.send raised unexpectedly")
+```
+
+The H1 fix scrubs the exception STRING inside
+`TelegramClient.send`'s own try/except. But the alerter's
+defense-in-depth wrap uses `logger.exception(...)` which logs the
+**traceback** via `sys.exc_info()`. Empirical check:
+
+```
+ERROR alerts.test: TelegramClient.send raised unexpectedly
+Traceback (most recent call last):
+  File "<string>", line 19, in <module>
+_TokenBearing: fail with url=/botLIVETOKEN/sendMessage
+Token leaked in log: True
+```
+
+Currently safe because `TelegramClient.send` never raises (its
+own try/except catches everything before the message is logged).
+A future regression that removes the try/except, or any
+post-call code that raises with a token-bearing message, would
+re-expose H1 via the traceback.
+
+**Suggested fix (not blocking):** install a `logging.Filter` on
+the alerts package logger that runs `_scrub_exception_text` over
+both `record.getMessage()` and `record.exc_text` (the cached
+traceback string). Wires once at module init; covers every log
+record from any future code path.
+
+```python
+class _TokenScrubFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.args:
+            record.args = tuple(
+                _scrub_exception_text(a) if isinstance(a, str) else a
+                for a in record.args
+            )
+        if record.exc_text:
+            record.exc_text = _scrub_exception_text(record.exc_text)
+        return True
+
+logging.getLogger("alerts").addFilter(_TokenScrubFilter())
+```
+
+The targeted H1 fix is correct for the current code; this is
+strictly defense-in-depth for future-proofing. LOW severity.
+
+## Deferred items unchanged
+
+M1 (severity not in coalesce key), M2 (clock-skew defence),
+M3 (test comment fix), M4 (CRITICAL-after-elapsed test),
+M5 (control-character sanitisation), L1–L5 from the original
+review — all unchanged in this commit, all reasonable to defer
+to the commit-2 integration pass.
+
+## Final recommendation
+
+**APPROVE FOR MERGE.**
+
+H1 is properly fixed and pinned by tests that exercise the bug
+path. The regex is tight, the audit confirms no other token-
+bearing log paths in the module, and the false-positive surface
+is explicitly documented. N1 is a defense-in-depth follow-up that
+matters only for future regressions in `TelegramClient.send` —
+not blocking.
+
+The original review's MEDIUM/LOW items remain valid for commit 2
+but none is blocking for the module-only commit. The Phase 9
+module is ready to land on `develop`.
