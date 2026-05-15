@@ -25,6 +25,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from alerts import Alert, AlertCategory, AlertSeverity, TelegramAlerter
 from feed.ig_rest import (
     AllowanceExceeded,
     AmendRequest,
@@ -65,6 +66,7 @@ class Executor:
         epic_resolver: Callable[[str], str],
         clock: Optional[Callable[[], datetime]] = None,
         sleep: Optional[Callable[[float], None]] = None,
+        alerter: Optional[TelegramAlerter] = None,
     ) -> None:
         """Construct.
 
@@ -84,12 +86,20 @@ class Executor:
         sleep
             Optional sleep override (defaults to :py:func:`time.sleep`).
             Tests supply a no-op or recording stub.
+        alerter
+            Optional :class:`alerts.TelegramAlerter`. When wired,
+            ``open_from_signal`` emits ``TRADE_OPENED`` (INFO) on
+            broker-confirmed open and ``apply_amend`` emits
+            ``AMEND_FAILED`` (WARNING) on broker rejection. ``None``
+            (the default) keeps the executor a quiet no-op for tests
+            and pre-Phase-9 callers.
         """
         self._positions = position_manager
         self._client = client
         self._resolve_epic = epic_resolver
         self._clock = clock or (lambda: datetime.now(tz=timezone.utc))
         self._sleep = sleep or time.sleep
+        self._alerter = alerter
 
     # --- Open from signal ---------------------------------------------------
 
@@ -244,6 +254,7 @@ class Executor:
             # sees the root cause; the emergency-close outcome is on
             # the log.
             raise
+        self._emit_trade_opened(order=order, position=position)
         return TradeResult(
             success=True,
             deal_id=position.deal_id,
@@ -309,6 +320,9 @@ class Executor:
                 continue
             break
         else:
+            self._emit_amend_failed(
+                position=position, amend=amend, reason=last_error,
+            )
             return AmendResult(
                 success=False,
                 deal_id=amend.deal_id,
@@ -325,7 +339,39 @@ class Executor:
             be_moved=True if is_be_move else None,
             trail_active=True if is_be_move else None,
         )
-        self._positions.upsert(updated)
+        # H1 (Session-3 commit-2b review): mirror the M2 pattern from
+        # open_from_signal — if local persistence fails AFTER the
+        # broker has accepted the amend, the broker holds the new SL
+        # and our local state still has the old one. Reconciliation's
+        # "broker is authoritative on SL" rule would silently mask the
+        # divergence (next pass writes broker_sl back into local state
+        # without an alert, because SL_DRIFT_LARGE doesn't translate
+        # to an alert). Fail loudly: log CRITICAL, fire a CRITICAL
+        # AMEND_PERSIST_FAILED alert (bypasses coalescing), and
+        # re-raise the original persistence error so the caller can
+        # crash the bot rather than continue with desynced state.
+        # Emergency action: unlike open_from_signal we do NOT try to
+        # revert the amend automatically — a revert call is itself a
+        # broker round-trip that can fail, and a failed-revert loop is
+        # worse than a loud crash. Operator reconciles manually.
+        try:
+            self._positions.upsert(updated)
+        except Exception as upsert_exc:
+            logger.critical(
+                "Amend persisted at broker but local upsert FAILED — "
+                "STATE DIVERGED: deal_id=%s, broker_new_sl=%s, "
+                "local_old_sl=%s, exception=%r. CRITICAL alert "
+                "dispatched; re-raising for caller to handle.",
+                position.deal_id,
+                amend.new_sl_price,
+                position.current_sl_price,
+                upsert_exc,
+                exc_info=True,
+            )
+            self._emit_amend_persist_failed(
+                position=position, amend=amend, exc_summary=str(upsert_exc),
+            )
+            raise
         return AmendResult(
             success=True,
             deal_id=amend.deal_id,
@@ -333,6 +379,134 @@ class Executor:
             reason=amend.reason,
             broker_status=confirmation.status,
         )
+
+
+    # ------------------------------------------------------------------
+    # Alerter helpers
+    # ------------------------------------------------------------------
+
+    def _emit_trade_opened(
+        self, *, order: TradeOrder, position: ExecutionPosition,
+    ) -> None:
+        if self._alerter is None:
+            return
+        side = "BUY" if order.direction == Direction.BULLISH else "SELL"
+        full = (
+            f"{order.pair} {side} @ {position.entry_price:.5f} "
+            f"SL={position.current_sl_price:.5f} "
+            f"strategy={order.strategy_name}"
+        )
+        short = f"{side} @ {position.entry_price:.5f}"
+        try:
+            self._alerter.send(
+                Alert(
+                    category=AlertCategory.TRADE,
+                    event_subtype="TRADE_OPENED",
+                    severity=AlertSeverity.INFO,
+                    pair=order.pair,
+                    full_text=full,
+                    short_text=short,
+                    timestamp=self._clock(),
+                    debug={
+                        "deal_id": position.deal_id,
+                        "strategy": order.strategy_name,
+                        "regime": str(order.regime_at_entry),
+                    },
+                )
+            )
+        except Exception:
+            logger.exception("alerter.send raised for TRADE_OPENED")
+
+    def _emit_amend_failed(
+        self,
+        *,
+        position: ExecutionPosition,
+        amend: AmendOrder,
+        reason: Optional[str],
+    ) -> None:
+        if self._alerter is None:
+            return
+        full = (
+            f"SL amend failed for {position.pair} deal={amend.deal_id} "
+            f"new_sl={amend.new_sl_price:.5f} reason={reason or 'unknown'}"
+        )
+        short = f"deal={amend.deal_id}: {reason or 'unknown'}"
+        try:
+            self._alerter.send(
+                Alert(
+                    category=AlertCategory.TRADE,
+                    event_subtype="AMEND_FAILED",
+                    severity=AlertSeverity.WARNING,
+                    pair=position.pair,
+                    full_text=full,
+                    short_text=short,
+                    timestamp=self._clock(),
+                    debug={
+                        "deal_id": amend.deal_id,
+                        "new_sl": amend.new_sl_price,
+                        "reason": reason,
+                        "amend_reason": amend.reason,
+                    },
+                )
+            )
+        except Exception:
+            logger.exception("alerter.send raised for AMEND_FAILED")
+
+    def _emit_amend_persist_failed(
+        self,
+        *,
+        position: ExecutionPosition,
+        amend: AmendOrder,
+        exc_summary: str,
+    ) -> None:
+        """CRITICAL alert when broker accepts amend but local upsert fails.
+
+        H1 (Session-3 commit-2b review): the broker now holds the
+        updated SL and our local state still has the old one. Future
+        reconciliation passes silently overwrite local with broker's
+        value — without an alert, the operator never learns that a
+        persistence failure happened. CRITICAL severity bypasses
+        coalescing so the alert ships immediately, even if the bot
+        crashes in the next instruction (the alerter has its own
+        three-layer isolation; the call returns before the raise).
+        """
+        if self._alerter is None:
+            return
+        full = (
+            f"\U0001f6a8 AMEND PERSIST FAILED\n"
+            f"{position.pair} deal={position.deal_id}\n"
+            f"Broker SL: {amend.new_sl_price:.5f} | "
+            f"Local SL: {position.current_sl_price:.5f}\n"
+            f"STATE DIVERGED — manual reconciliation required\n"
+            f"Error: {exc_summary}"
+        )
+        short = (
+            f"{position.pair} STATE DIVERGED deal={position.deal_id}"
+        )
+        try:
+            self._alerter.send(
+                Alert(
+                    category=AlertCategory.TRADE,
+                    event_subtype="AMEND_PERSIST_FAILED",
+                    severity=AlertSeverity.CRITICAL,
+                    pair=position.pair,
+                    full_text=full,
+                    short_text=short,
+                    timestamp=self._clock(),
+                    debug={
+                        "deal_id": position.deal_id,
+                        "broker_new_sl": amend.new_sl_price,
+                        "local_old_sl": position.current_sl_price,
+                        "exception": exc_summary,
+                    },
+                )
+            )
+        except Exception:
+            logger.exception(
+                "alerter.send raised for AMEND_PERSIST_FAILED — "
+                "STATE DIVERGENCE is unalerted; operator must check "
+                "logs for the persist-failure CRITICAL line"
+            )
 
 
 # ---------------------------------------------------------------------------

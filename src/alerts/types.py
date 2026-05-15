@@ -12,8 +12,11 @@ Severity (locked in the Phase 9 plan):
 - ``WARNING`` — operator should look but the bot keeps running:
   AMEND_FAILED, BROKER_ORPHAN, MISSING_LOCAL_KEPT, MANUAL_SL_MOVE,
   FEED_STALE.
-- ``CRITICAL`` — bot-stopping conditions only:
-  FAILURE_THRESHOLD_TRIPPED, SHUTDOWN (after crashed=True).
+- ``CRITICAL`` — bot-stopping conditions and state-divergence
+  emergencies: FAILURE_THRESHOLD_TRIPPED, SHUTDOWN (after
+  crashed=True), AMEND_PERSIST_FAILED (H1, Session-3 commit-2b
+  review — broker accepted amend, local persist failed; operator
+  must reconcile manually).
 
 CRITICAL is the only severity that bypasses coalescing — see
 :py:mod:`alerts.coalescer`. Reserving the immediate-send channel for
@@ -62,6 +65,7 @@ EVENT_SUBTYPES: tuple[str, ...] = (
     "TRADE_OPENED",
     "TRADE_CLOSED",
     "AMEND_FAILED",
+    "AMEND_PERSIST_FAILED",
     # RECONCILIATION
     "BROKER_ORPHAN",
     "MISSING_LOCAL_KEPT",
