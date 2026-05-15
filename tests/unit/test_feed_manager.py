@@ -367,6 +367,49 @@ def test_watchdog_returns_empty_before_live(tmp_path: Path) -> None:
     assert fm.watchdog_stale_pairs() == []
 
 
+def test_watchdog_skips_saturday_reports_wednesday(tmp_path: Path) -> None:
+    """M8: watchdog must short-circuit when the FX market is closed.
+
+    The existing watchdog tests happen to use ``_NOW = 2026-05-15``
+    which is a Friday. This test pins the weekend gating directly: on
+    a Saturday UTC the method returns ``[]`` regardless of staleness;
+    on a weekday it surfaces stale pairs as before.
+    """
+    saturday = datetime(2026, 5, 16, 13, 0, tzinfo=timezone.utc)
+    wednesday = datetime(2026, 5, 13, 13, 0, tzinfo=timezone.utc)
+    assert saturday.isoweekday() == 6
+    assert wednesday.isoweekday() == 3
+
+    clock_ref = {"now": saturday}
+
+    def subscriber_factory(on_update, on_status):
+        return FakeSubscriber(on_update, on_status)
+
+    setups = [
+        PairSetup(
+            pair="GBPUSD",
+            epic="CS.D.GBPUSD.TODAY.IP",
+            archive=CandleArchive("GBPUSD", base_dir=tmp_path),
+            buffer=RollingBuffer("GBPUSD", capacity=200),
+        )
+    ]
+    fm = FeedManager.from_pairs(
+        setups,
+        history_fetcher=lambda *a, **kw: {"prices": []},
+        subscriber_factory=subscriber_factory,  # type: ignore[arg-type]
+        clock=lambda: clock_ref["now"],
+    )
+    fm.start_live()  # is_live=True so the live-gate doesn't short-circuit
+    # last_update_time_utc is None → would normally surface as stale.
+
+    # Saturday: market closed → empty list regardless of staleness.
+    assert fm.watchdog_stale_pairs() == []
+
+    # Wednesday: market open → the pair surfaces (no LS update ever arrived).
+    clock_ref["now"] = wednesday
+    assert fm.watchdog_stale_pairs() == ["GBPUSD"]
+
+
 # ---------------------------------------------------------------------------
 # H4 — out-of-order observability
 # ---------------------------------------------------------------------------

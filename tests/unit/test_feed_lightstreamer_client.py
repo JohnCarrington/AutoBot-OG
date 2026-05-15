@@ -18,7 +18,7 @@ from typing import Any, Optional
 import pytest
 
 from feed.constants import (
-    LIGHTSTREAMER_CANDLE_ADAPTER,
+    LIGHTSTREAMER_CANDLE_ITEM_TEMPLATE,
     LIGHTSTREAMER_CANDLE_FIELDS,
     LIGHTSTREAMER_CANDLE_MODE,
 )
@@ -180,11 +180,15 @@ def test_subscribe_pair_uses_locked_adapter_and_fields(fake_client_factory) -> N
     sub.subscribe_pair(SubscriptionSpec(pair="GBPUSD", epic="CS.D.GBPUSD.TODAY.IP"))
     fake = fake_client_factory.holder["c"]
     assert len(fake.subscriptions) == 1
-    # Real LS Subscription object — query via SDK accessors.
+    # Real LS Subscription object — query via SDK accessors. NB: this
+    # test depends on lightstreamer-client-lib==1.0.3 (pinned in
+    # pyproject.toml) exposing getMode/getItems/getFields/getListeners.
+    # If we ever bump the SDK and the accessor API changes, this is
+    # where it shows up. (L2, Phase 7 follow-up.)
     s = fake.subscriptions[0]
     assert s.getMode() == LIGHTSTREAMER_CANDLE_MODE
     assert list(s.getItems()) == [
-        LIGHTSTREAMER_CANDLE_ADAPTER.format(epic="CS.D.GBPUSD.TODAY.IP")
+        LIGHTSTREAMER_CANDLE_ITEM_TEMPLATE.format(epic="CS.D.GBPUSD.TODAY.IP")
     ]
     assert list(s.getFields()) == list(LIGHTSTREAMER_CANDLE_FIELDS)
 

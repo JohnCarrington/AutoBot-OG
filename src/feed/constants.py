@@ -36,9 +36,12 @@ Locked decisions
 
 Locked from the probe (``scripts/probe_lightstreamer_output_2026-05-15.json``):
 
-- ``LIGHTSTREAMER_CANDLE_ADAPTER = "CHART:{epic}:5MINUTE"`` — verified
-  on IG demo against ``CS.D.GBPUSD.TODAY.IP``; subscription accepted
-  and first payload contained every requested field.
+- ``LIGHTSTREAMER_CANDLE_ITEM_TEMPLATE = "CHART:{epic}:5MINUTE"`` —
+  verified on IG demo against ``CS.D.GBPUSD.TODAY.IP``; subscription
+  accepted and first payload contained every requested field. The
+  Lightstreamer *adapter set* is the separate ``"DEFAULT"`` string we
+  pass to :class:`LightstreamerClient` — this constant is the item
+  template, not the adapter set. (L1, follow-up cleanup 2026-05-15.)
 - ``LIGHTSTREAMER_CANDLE_MODE = "MERGE"`` — the only mode IG accepts
   for CHART items.
 - ``LIGHTSTREAMER_CANDLE_FIELDS`` — exactly the 12-field list the probe
@@ -91,7 +94,8 @@ FEED_GAP_FILL_WINDOW_MIN: int = _i("FEED_GAP_FILL_WINDOW_MIN", 30)
 FEED_WATCHDOG_STALE_SEC: int = _i("FEED_WATCHDOG_STALE_SEC", 600)
 
 # --- Lightstreamer subscription (probe-locked) -----------------------------
-LIGHTSTREAMER_CANDLE_ADAPTER: str = "CHART:{epic}:5MINUTE"
+# ITEM_TEMPLATE, not adapter set — see L1 in the Phase 7 follow-up.
+LIGHTSTREAMER_CANDLE_ITEM_TEMPLATE: str = "CHART:{epic}:5MINUTE"
 LIGHTSTREAMER_CANDLE_MODE: str = "MERGE"
 LIGHTSTREAMER_CANDLE_FIELDS: tuple[str, ...] = (
     "UTM",
@@ -163,8 +167,8 @@ __all__ = [
     "FEED_GAP_FILL_WINDOW_MIN",
     "FEED_MIN_USABLE_BARS",
     "FEED_WATCHDOG_STALE_SEC",
-    "LIGHTSTREAMER_CANDLE_ADAPTER",
     "LIGHTSTREAMER_CANDLE_FIELDS",
+    "LIGHTSTREAMER_CANDLE_ITEM_TEMPLATE",
     "LIGHTSTREAMER_CANDLE_MODE",
     "LIGHTSTREAMER_ENDPOINT_BY_ACC",
     "MARKET_HOURS_GUARDS",

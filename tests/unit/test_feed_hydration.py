@@ -277,6 +277,44 @@ def test_hydrate_rest_failure_no_cache_returns_failed(tmp_path: Path) -> None:
     assert report.rest_bars == 0
 
 
+def test_hydrate_archive_oserror_leaves_buffer_empty_report_failed(
+    tmp_path: Path,
+) -> None:
+    """M1: archive failure during hydration must NOT half-populate the buffer.
+
+    The cleanup commit swapped the merge order to ``archive.append_many``
+    *before* ``buffer.bulk_append``, so an OSError on the archive write
+    propagates before any buffer mutation. The result is a clean
+    ``mode="failed"`` report with ``final_buffer_size=0``; recovery on
+    next startup sees a known state instead of a buffer-archive
+    divergence.
+    """
+    pair = "GBPUSD"
+
+    class _BrokenArchive(CandleArchive):
+        def append_many(self, candles):  # noqa: D401 — test override
+            raise OSError("simulated disk-full mid-write")
+
+    archive = _BrokenArchive(pair, base_dir=tmp_path)
+    buf = RollingBuffer(pair, capacity=200)
+    bundles = [
+        PairBundle(pair=pair, epic="CS.D.GBPUSD.TODAY.IP", archive=archive, buffer=buf)
+    ]
+
+    def fetcher(*_a, **_kw):
+        return _ig_payload(n=100)  # cold REST returns 100 bars
+
+    report = hydrate_pairs(
+        bundles, fetcher=fetcher, now_utc=lambda: _NOW,
+    )
+    by_pair = {r.pair: r for r in report.per_pair}
+    assert by_pair[pair].mode == "failed"
+    assert by_pair[pair].final_buffer_size == 0
+    assert "disk-full" in (by_pair[pair].error or "")
+    # The critical post-condition: the buffer was NOT half-populated.
+    assert len(buf) == 0
+
+
 def test_hydrate_pair_does_not_re_archive_cached_bars(tmp_path: Path) -> None:
     pair = "GBPUSD"
     bars = [

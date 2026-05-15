@@ -281,18 +281,7 @@ class CandleArchive:
             self._last_ts = _ms(existing[-1].close_time)
 
 
-def archive_dir_for_tests(base_dir: str | Path) -> Path:
-    """Test helper: return an absolute :class:`Path` rooted at ``base_dir``.
-
-    Tests pass ``tmp_path`` here so they get their own scratch
-    directory without touching the project's real ``data/candles/``.
-    """
-    p = Path(base_dir).resolve()
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-
-__all__ = ["CandleArchive", "archive_dir_for_tests"]
+__all__ = ["CandleArchive"]
 
 
 # Make sure the default archive directory exists at import time so

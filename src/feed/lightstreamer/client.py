@@ -42,7 +42,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from ..constants import (
-    LIGHTSTREAMER_CANDLE_ADAPTER,
+    LIGHTSTREAMER_CANDLE_ITEM_TEMPLATE,
     LIGHTSTREAMER_CANDLE_FIELDS,
     LIGHTSTREAMER_CANDLE_MODE,
     LIGHTSTREAMER_ENDPOINT_BY_ACC,
@@ -190,11 +190,19 @@ class LightstreamerSubscriber:
         logger.info(
             "Lightstreamer subscribed: pair=%s item=%s",
             spec.pair,
-            LIGHTSTREAMER_CANDLE_ADAPTER.format(epic=spec.epic),
+            LIGHTSTREAMER_CANDLE_ITEM_TEMPLATE.format(epic=spec.epic),
         )
 
     def disconnect(self) -> None:
-        """Drop all subscriptions and close the LS session."""
+        """Drop all subscriptions and close the LS session.
+
+        Failures from ``unsubscribe`` / ``disconnect`` are caught and
+        logged at WARNING so a teardown error never blocks shutdown.
+        The LS reader thread may still be alive briefly after we null
+        ``self._client``; the manager's :py:meth:`FeedManager._dispatch`
+        try/except absorbs any callback that fires during that window.
+        (L4, Phase 7 follow-up.)
+        """
         for pair, sub in list(self._subscriptions.items()):
             try:
                 if self._client is not None:
@@ -272,7 +280,7 @@ class LightstreamerSubscriber:
         return LightstreamerClient(self._endpoint, "DEFAULT")
 
     def _build_subscription(self, spec: SubscriptionSpec) -> Any:
-        item = LIGHTSTREAMER_CANDLE_ADAPTER.format(epic=spec.epic)
+        item = LIGHTSTREAMER_CANDLE_ITEM_TEMPLATE.format(epic=spec.epic)
         if self._ls_client_factory is not None:
             # In tests, the factory exposes a callable on the client for
             # building subscriptions. Falling back to the real SDK is

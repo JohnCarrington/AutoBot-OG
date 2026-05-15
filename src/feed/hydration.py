@@ -16,11 +16,16 @@ Decision tree (per pair)::
         # Cache-only: no REST call.
     elif cached:
         # Cache-stale or short: REST top-up only the missing tail.
+        # On REST failure with len(cached) >= FEED_MIN_USABLE_BARS,
+        # fall back to cache-only-degraded (H1 fix); otherwise mark
+        # the pair as failed.
     else:
         # No cache: REST fetch BACKFILL_BARS.
 
-    buffer.bulk_append(cached + rest_topup)
+    # Archive write precedes buffer mutation so an OSError leaves the
+    # report ``failed`` cleanly without a populated buffer (M1 fix).
     archive.append_many(rest_topup)   # new bars only
+    buffer.bulk_append(cached + rest_topup)
 
 Reasoning:
 
@@ -308,7 +313,17 @@ def _parse_ig_timestamp(s: str, *, is_utc: bool) -> Optional[datetime]:
 
 
 def _coerce_to_utc(dt: datetime, *, is_utc: bool) -> datetime:
-    """Return ``dt`` as a UTC-tz-aware datetime, applying London tz if needed."""
+    """Return ``dt`` as a UTC-tz-aware datetime, applying London tz if needed.
+
+    DST caveat (A2, Phase 7 follow-up): a naive timestamp inside the
+    autumn fall-back ambiguous hour (e.g. 2026-10-25 01:30 in London,
+    which exists *twice* — once as BST and once as GMT) is interpreted
+    with ``fold=0`` semantics, i.e. the **first occurrence** (BST).
+    In practice the FX market closes for the weekend around the UK DST
+    transitions so the affected window is empty; the safer path is for
+    callers to consume ``snapshotTimeUTC`` (v2 REST) or strings with an
+    explicit offset, both of which bypass the London-tz branch here.
+    """
     if dt.tzinfo is not None:
         # An explicit offset wins regardless of ``is_utc`` — IG is
         # already telling us the zone.
@@ -458,18 +473,24 @@ def hydrate_pair(
                 error=f"cold REST fetch failed: {exc}",
             )
 
-    # --- 3. Merge into buffer + archive ------------------------------
+    # --- 3. Merge into archive + buffer ------------------------------
     # Buffer wants strictly increasing order. Cached is already sorted
     # by load(); rest_bars is sorted by parse_ig_history.
+    #
+    # M1 (Phase 7 adversarial review): archive is written FIRST so that
+    # an OSError (disk full, perms) on the archive write doesn't leave
+    # the buffer populated with bars that aren't durable. With this
+    # order an archive failure propagates up before the buffer mutates,
+    # and ``hydrate_pairs`` reports the pair as ``failed`` cleanly.
     combined: list[Candle] = list(cached)
     if rest_bars:
         combined.extend(rest_bars)
     if combined:
-        buffer.bulk_append(combined)
         # Only NEW bars are appended to the archive — the cache entries
         # are already on disk. The archive's _last_ts guard makes this
         # idempotent but the explicit slice keeps I/O bounded.
         archive.append_many(rest_bars)
+        buffer.bulk_append(combined)
 
     newest = combined[-1].close_time if combined else None
     return PairHydrationReport(

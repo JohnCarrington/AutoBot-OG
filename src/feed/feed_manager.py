@@ -72,6 +72,7 @@ from .constants import (
     FEED_BACKFILL_BARS,
     FEED_GAP_FILL_WINDOW_MIN,
     FEED_WATCHDOG_STALE_SEC,
+    MARKET_HOURS_GUARDS,
 )
 from .hydration import (
     HistoryFetcher,
@@ -120,6 +121,19 @@ class _PairState:
     H4 (adversarial review 2026-05-15): silent drops at DEBUG hid the
     failure mode; we now log WARNING + bump this counter so ops can
     surface it via :py:meth:`FeedManager.out_of_order_counts`.
+
+    First-update edge cases (M3, Phase 7 follow-up):
+
+    - ``last_emitted_close = None`` until the first LS update lands.
+      Hydration seeds it to ``buffer.latest().close_time`` and sets
+      ``last_emitted_was_closed = True`` so the *first* live update,
+      even if it arrives mid-bar past the hydrated tail's boundary,
+      takes Path 1 (boundary crossing) without double-emitting a
+      BAR_CLOSE for the hydrated bar.
+    - If hydration produced no bars (e.g. ``failed`` mode), the first
+      live update takes Path 2 (``prev_close is None``) — emits a
+      single BAR_UPDATE; the bar's true open/close lifecycle is
+      resolved on subsequent updates.
     """
 
     pair: str
@@ -288,6 +302,13 @@ class FeedManager:
         produced the event (LS reader for live events, the caller's
         thread for ``hydrate``-time events). The order callbacks
         register is the order they fire.
+
+        Consume ``event.candle`` directly inside the callback rather
+        than calling back into :py:meth:`latest_candle`. The two
+        return different bars during the gap-fill replay path (the
+        per-bar BAR_CLOSE loop dispatches older bars while the buffer
+        already holds the newest backfilled bar). See A3 in the Phase
+        7 follow-up notes.
         """
         self._callbacks.append(callback)
 
@@ -326,10 +347,18 @@ class FeedManager:
         Used by an external watchdog loop (Phase 8+). Returns
         :pythoncode:`[]` before live mode is engaged so cold-start
         hydration alone doesn't trip the alarm.
+
+        M8 (Phase 7 adversarial review): also returns :pythoncode:`[]`
+        when the FX market is closed (Saturday UTC) so the watchdog
+        doesn't false-positive every pair across the weekend. The
+        market-open window is locked to :data:`MARKET_HOURS_GUARDS`;
+        the risk layer enforces finer-grained session bans.
         """
         if not self._is_live:
             return []
         now = self._clock()
+        if not _is_market_open(now):
+            return []
         out: list[str] = []
         for pair, state in self._pair_states.items():
             if state.last_update_time_utc is None:
@@ -502,6 +531,13 @@ class FeedManager:
                 # to re-run their decision pipeline correctly. Emitting
                 # only a single GAP_FILLED at the end silently starves
                 # them of intermediate closes.
+                #
+                # A3 (follow-up): callbacks invoked from this loop must
+                # consume ``event.candle`` directly — calling
+                # :py:meth:`FeedManager.latest_candle` from inside a
+                # per-bar BAR_CLOSE handler returns ``missing[-1]`` for
+                # every iteration (the buffer was already populated by
+                # ``bulk_append`` above), not the bar being dispatched.
                 for bar in missing:
                     self._dispatch(
                         FeedEventKind.BAR_CLOSE,
@@ -566,6 +602,21 @@ def _is_connected(status: Optional[str]) -> bool:
     if not status:
         return False
     return status.upper().startswith(_CONNECTED_PREFIX)
+
+
+def _is_market_open(now: datetime) -> bool:
+    """Return True if ``now`` falls within the FX market-open weekday span.
+
+    Reads :data:`MARKET_HOURS_GUARDS["OPEN_WEEKDAYS"]` as an
+    ISO-weekday range ``(start, end)``. Wraps if ``start > end`` (the
+    locked default is ``(7, 5)`` — open Sun → Fri, closed Sat).
+    """
+    weekday = now.isoweekday()  # Mon=1 ... Sun=7
+    start, end = MARKET_HOURS_GUARDS["OPEN_WEEKDAYS"]
+    if start <= end:
+        return start <= weekday <= end
+    # Wrap: open weekday >= start OR weekday <= end.
+    return weekday >= start or weekday <= end
 
 
 __all__ = ["EventCallback", "FeedManager", "PairSetup"]

@@ -252,6 +252,12 @@ def _connect_lightstreamer(endpoint: str, account_id: str, cst: str, xst: str):
     last_status = ""
     while time.time() < deadline:
         last_status = client.getStatus()
+        # NB: naive ``"CONNECTED" in …`` also matches ``DISCONNECTED``.
+        # This is a probe script (one-shot, manually inspected) so the
+        # trap never materialises — but **do not copy this pattern**
+        # into production code. The fix is the ``CONNECTED:`` prefix
+        # match in src/feed/feed_manager.py:_is_connected. (L5, Phase
+        # 7 follow-up.)
         if "CONNECTED" in last_status.upper():
             logger.info("Lightstreamer connected (status=%s)", last_status)
             return client
