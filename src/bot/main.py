@@ -106,6 +106,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
     # --- Subscription verification (post-start, async settling) ---------
+    # H4 (adversarial review 2026-05-15): BotLoop.start() leaves state at
+    # STARTING — events arriving during this window are dropped. Only
+    # promote to NORMAL via mark_ready() after subscriptions confirm.
     sub_check = preflight_mod.verify_subscriptions(
         subscriber=subscriber,
         expected_pairs=config.pairs,
@@ -114,6 +117,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not sub_check.ok:
         bot.stop(inflight_timeout_sec=BOT_SHUTDOWN_INFLIGHT_TIMEOUT_SEC)
         return 1
+    bot.mark_ready()
 
     # --- Main thread: block on shutdown event ---------------------------
     logger.info("BotLoop running — awaiting shutdown signal")
@@ -164,13 +168,19 @@ def _build_runtime(config: BotRuntimeConfig) -> tuple[BotLoop, LightstreamerSubs
     # Persistent state.
     position_manager = PositionManager.load_from_path()
 
-    # Risk guard — needs at least one regime engine. v1 design is
-    # per-pair regime; the BotLoop instantiates per-pair engines
-    # internally, so we hand RiskGuard the "first pair's" engine for
-    # the rule that consults regime state (TREND-overnight-hold). v1
-    # trades GBPUSD only, so this collapses cleanly.
-    primary_regime = RegimeEngine()
-    risk_guard = RiskGuard(engine=primary_regime)
+    # Risk guard — must share regime engines with BotLoop (C2 fix,
+    # adversarial review 2026-05-15). We build the per-pair engine map
+    # here and pass the same instances to BOTH BotLoop and RiskGuard:
+    # BotLoop feeds the engines via process_m5_close / process_h1_close;
+    # RiskGuard reads them via the engine_for_pair callable. The old
+    # code wired a standalone engine into RiskGuard that nothing fed —
+    # the regime-instability circuit breaker was silently disabled.
+    regime_engines: dict[str, RegimeEngine] = {
+        p: RegimeEngine() for p in config.pairs
+    }
+    risk_guard = RiskGuard(
+        engine_for_pair=lambda pair: regime_engines[pair],
+    )
 
     # Executor.
     def _epic_resolver(pair: str) -> str:
@@ -230,18 +240,22 @@ def _build_runtime(config: BotRuntimeConfig) -> tuple[BotLoop, LightstreamerSubs
         position_manager=position_manager,
         pairs=config.pairs,
         pair_to_epic=config.pair_to_epic,
+        regime_engines=regime_engines,  # shared with RiskGuard (C2)
         clock=lambda: datetime.now(timezone.utc),
     )
 
     # ``start_live`` creates the subscriber; until then ``captured`` is
-    # empty. Return a thunk-shaped accessor: the caller (main loop)
-    # reads it *after* bot.start() returns.
-    class _LateSubscriber:
+    # empty. We expose a tiny duck-typed object with the single property
+    # ``verify_subscriptions`` needs. L4 (Phase 8 follow-up): inline as
+    # a SimpleNamespace-with-descriptor rather than a nested class.
+    class _LateSubscriberView:
+        __slots__ = ()
+
         @property
         def subscribed_pairs(self) -> tuple[str, ...]:
             return captured[0].subscribed_pairs if captured else ()
 
-    return bot, _LateSubscriber()  # type: ignore[return-value]
+    return bot, _LateSubscriberView()  # type: ignore[return-value]
 
 
 def _extract_tokens(session) -> tuple[str, str]:

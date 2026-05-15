@@ -85,6 +85,15 @@ belongs to its respective module.
 - `AccountState.balance` defaults to 10000 GBP and `realized_pnl_today_r`
   to 0.0. Phase 9+ will pull balance from the broker and maintain a
   realized-PnL ledger via reconciliation events.
+- **Daily-DD circuit breaker is informational only in v1.** Because
+  `realized_pnl_today_r` is hardcoded to 0 (above), the
+  `check_daily_dd` rule in `risk.rules.circuit_breakers` never trips
+  on realised losses — only on the unrealised side from
+  `OpenPosition.current_pnl_r`. A bot that takes five `-1R` losing
+  trades in a row would still be cleared to take a sixth. Operators
+  must watch the daily PnL externally until Phase 9+ wires the
+  ledger via `reconciliation.outcome` close events. BotLoop logs a
+  WARNING on construction calling this out.
 - H1 candles are resampled from the M5 rolling buffer on every
   BAR_CLOSE (`df_m5.resample("1h")`). v1's `RollingBuffer` is M5-only;
   storing H1 separately is Phase 9+.

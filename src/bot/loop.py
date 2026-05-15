@@ -165,6 +165,7 @@ class BotLoop:
         account_balance: float = _DEFAULT_BALANCE,
         account_currency: str = _DEFAULT_CURRENCY,
         clock: Optional[Callable[[], datetime]] = None,
+        regime_engines: Optional[dict[str, RegimeEngine]] = None,
     ) -> None:
         self._feed = feed_manager
         self._client = ig_client
@@ -178,9 +179,26 @@ class BotLoop:
         self._clock = clock or (lambda: datetime.now(timezone.utc))
 
         self._state: BotState = BotState.STARTING
-        # One regime engine per pair (v1: per-pair regime).
+        # One regime engine per pair (v1: per-pair regime). Callers
+        # (bot.main._build_runtime, tests) MAY supply the engine map
+        # so the same instances can also be handed to RiskGuard via
+        # an ``engine_for_pair`` callable — that's the C2 fix. When
+        # omitted, BotLoop constructs its own; the caller is then
+        # responsible for not also wiring a *different* engine into
+        # RiskGuard (which is exactly how the C2 bug shipped).
+        if regime_engines is not None:
+            missing = set(self._pairs) - set(regime_engines.keys())
+            if missing:
+                raise ValueError(
+                    f"regime_engines is missing entries for pairs: "
+                    f"{sorted(missing)}"
+                )
+            engine_map = dict(regime_engines)
+        else:
+            engine_map = {p: RegimeEngine() for p in self._pairs}
+        self._regime_engines: dict[str, RegimeEngine] = engine_map
         self._pair_state: dict[str, _PerPairBotState] = {
-            p: _PerPairBotState(pair=p, regime_engine=RegimeEngine())
+            p: _PerPairBotState(pair=p, regime_engine=engine_map[p])
             for p in self._pairs
         }
         self._last_reconciliation_at: datetime = self._clock()
@@ -206,6 +224,18 @@ class BotLoop:
         # Realized PnL ledger — v1 keeps a running counter; Phase 9+
         # will source from reconciliation events. Starts at 0.
         self._realized_pnl_today_r: float = 0.0
+        # M1 (adversarial review 2026-05-15): make the v1 limitation
+        # loud on construction. The daily-DD circuit breaker reads
+        # account.realized_pnl_today_r — with the counter pinned to
+        # zero, the breaker is informational only and will not block
+        # a 6th losing trade after 5 in a row. Phase 9+ wires this up
+        # via the reconciliation outcome's close events.
+        logger.warning(
+            "BotLoop v1 limitation: realized_pnl_today_r is hardcoded "
+            "to 0.0 — the daily-DD circuit breaker is informational "
+            "only until Phase 9+ adds a realized-PnL ledger. See "
+            "src/bot/MODULE.md (v1 simplifications)."
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -225,9 +255,31 @@ class BotLoop:
             )
 
     def start(self) -> None:
-        """Register the event callback and open the LS subscription."""
+        """Register the event callback and open the LS subscription.
+
+        State remains :data:`BotState.STARTING` after this returns. The
+        main thread is expected to run :py:func:`bot.preflight.verify_subscriptions`
+        next, and only then call :py:meth:`mark_ready` to flip the
+        state to ``NORMAL``. H4 (adversarial review 2026-05-15): the
+        old code unconditionally set NORMAL inside ``start()``, which
+        meant the bot reported NORMAL during the ~10-second window
+        while subscriptions could still be partially or wholly failed.
+        """
         self._feed.on_event(self._handle_feed_event)
         self._feed.start_live()
+        # State stays STARTING — caller verifies subscriptions, then
+        # calls mark_ready() to enter NORMAL.
+
+    def mark_ready(self) -> None:
+        """Promote :data:`STARTING` → :data:`NORMAL`.
+
+        Called by :func:`bot.main.main` after
+        :py:func:`bot.preflight.verify_subscriptions` confirms every
+        configured pair is live. Idempotent; a no-op once the bot has
+        already transitioned past ``STARTING``.
+        """
+        if self._state != BotState.STARTING:
+            return
         self._state = BotState.NORMAL
         logger.info("BotLoop entered state NORMAL")
 
@@ -306,14 +358,50 @@ class BotLoop:
     def state(self) -> BotState:
         return self._state
 
+    def regime_engine_for(self, pair: str) -> RegimeEngine:
+        """Return the per-pair regime engine — for sharing with RiskGuard.
+
+        bot.main wires ``RiskGuard(engine_for_pair=bot.regime_engine_for)``
+        so the risk layer reads the same engine the BotLoop feeds. C2
+        (adversarial review 2026-05-15): wiring a separate engine into
+        RiskGuard silently disabled the regime-instability circuit
+        breaker because nothing ever called ``process_*_close`` on the
+        standalone instance.
+        """
+        return self._regime_engines[pair]
+
+    @property
+    def regime_engines(self) -> dict[str, RegimeEngine]:
+        """Read-only view of the per-pair regime engine map.
+
+        Returns a shallow copy — callers must not mutate the dict.
+        Intended for ops introspection and the ``bot.main`` wiring
+        step (handed to ``RiskGuard(engine_for_pair=...)``).
+        """
+        return dict(self._regime_engines)
+
     # ------------------------------------------------------------------
     # Event handler
     # ------------------------------------------------------------------
 
     def _handle_feed_event(self, event: FeedEvent) -> None:
-        """Top-level event dispatch. Called on the LS reader thread."""
-        if self._state == BotState.SHUTTING_DOWN:
+        """Top-level event dispatch. Called on the LS reader thread.
+
+        M6 (adversarial review 2026-05-15): also gate STARTING. The
+        original guard only short-circuited SHUTTING_DOWN, which was
+        benign for the documented call order but fragile against any
+        refactor that inverted ``on_event`` vs ``start_live``.
+
+        M2 (adversarial review 2026-05-15): only ``BAR_CLOSE`` events
+        whose pipeline runs to completion reset the event-failure
+        counter. The original code reset on every successful dispatch
+        — including no-op kinds (``BAR_UPDATE``, status transitions)
+        — which let a busy bar's interleaved BAR_UPDATE successes
+        wipe out the failure count between failed BAR_CLOSE events.
+        """
+        if self._state in (BotState.STARTING, BotState.SHUTTING_DOWN):
             return
+        is_real_work = event.kind is FeedEventKind.BAR_CLOSE
         try:
             self._dispatch_event(event)
         except Exception as exc:
@@ -333,7 +421,10 @@ class BotLoop:
                 )
                 self.request_shutdown()
             return
-        self._event_failures.record_success()
+        if is_real_work:
+            # Only BAR_CLOSE represents "successful work" — no-op kinds
+            # never get to reset the counter (M2).
+            self._event_failures.record_success()
 
     def _dispatch_event(self, event: FeedEvent) -> None:
         kind = event.kind
@@ -391,7 +482,9 @@ class BotLoop:
             return
         df_m5_enriched = self._apply_indicators(df_m5)
         df_m5_enriched = add_fractal_swings(df_m5_enriched)
-        df_h1_enriched = self._derive_and_enrich_h1(df_m5_enriched)
+        df_h1_enriched = self._derive_and_enrich_h1(
+            df_m5_enriched, m5_close_time=candle.close_time,
+        )
 
         self._update_regime(pair, df_m5_enriched, df_h1_enriched, candle)
 
@@ -447,7 +540,9 @@ class BotLoop:
         out = add_bb_width_normalised(out, bb_period=20, bb_std=2.0, atr_period=14)
         return out
 
-    def _derive_and_enrich_h1(self, df_m5: pd.DataFrame) -> pd.DataFrame:
+    def _derive_and_enrich_h1(
+        self, df_m5: pd.DataFrame, *, m5_close_time: datetime,
+    ) -> pd.DataFrame:
         """Roll M5 → H1 by pandas resample, then apply H1 indicators.
 
         Phase 7's RollingBuffer is M5-only; the strategy dispatcher and
@@ -455,6 +550,17 @@ class BotLoop:
         M5 window on the fly. The resample uses ``label="right"`` and
         ``closed="right"`` so each H1 bar is anchored on its close,
         matching the M5 buffer's convention.
+
+        H1 (adversarial review 2026-05-15): at a mid-hour M5 close
+        (e.g. 13:35) the resample produces an H1 bar labelled 14:00
+        with only 7 of the expected 12 M5 contributions. ``dropna()``
+        does not remove it — every OHLC slot is populated. Strategies
+        gating on H1 indicators (`bb_reclaim`, `ema_continuation`)
+        would then see a value that recomputes on every M5 tick,
+        breaking the per-H1-bar stability the strategies assume.
+        Fix: drop the trailing forming H1 unless the M5 close that
+        triggered this call is exactly on an hour boundary (minute=0,
+        meaning the M5 bar closing now also closed an H1).
         """
         if df_m5.empty:
             return df_m5
@@ -469,7 +575,27 @@ class BotLoop:
         ).dropna()
         if agg.empty:
             return agg
+        if m5_close_time.minute != 0:
+            # The latest bin is the in-progress H1 — trim it. Strategies
+            # only see fully-closed H1 bars.
+            agg = agg.iloc[:-1]
+        if agg.empty:
+            return agg
         return self._apply_indicators(agg)
+
+    def _h1_for_test(self, pair: str, *, m5_close_time: datetime) -> pd.DataFrame:
+        """Test seam returning the H1 dataframe a BAR_CLOSE would produce.
+
+        Mirrors the exact computation in :py:meth:`_handle_bar_close`
+        but is reachable from tests without firing a full event. Used
+        to pin the H1-trim behaviour without exposing private state.
+        """
+        df_m5 = self._build_m5_dataframe(pair)
+        if df_m5.empty:
+            return df_m5
+        df_m5 = self._apply_indicators(df_m5)
+        df_m5 = add_fractal_swings(df_m5)
+        return self._derive_and_enrich_h1(df_m5, m5_close_time=m5_close_time)
 
     # ------------------------------------------------------------------
     # Regime
@@ -550,6 +676,14 @@ class BotLoop:
         list 99% of the time and a non-empty list on the EOD UTC
         boundary (or on regime-transition closes). We execute whatever
         it returns; the rule layer encapsulates the timing.
+
+        H3 (adversarial review 2026-05-15): a clean run records
+        success symmetrically with :py:meth:`_maybe_reconcile`. Before
+        the fix this method only ever bumped the failure counter,
+        creating a pathological pattern where a flaky reconciliation
+        could trip the threshold even when every interleaved
+        force-close ran cleanly — counter never reset between
+        reconciliation failures.
         """
         positions = self._collect_open_positions(latest_prices=self._latest_prices())
         try:
@@ -565,6 +699,8 @@ class BotLoop:
             self._maybe_periodic_shutdown()
             return
         if not orders:
+            # Clean no-op — reset the periodic counter (H3).
+            self._periodic_failures.record_success()
             return
         logger.info("RiskGuard returned %d force-close order(s)", len(orders))
         for order in orders:
@@ -580,6 +716,9 @@ class BotLoop:
                     "Force-close failed for %s (pair=%s reason=%s)",
                     order.position_id, order.pair, order.reason,
                 )
+        # Iteration completed (regardless of per-order broker failures)
+        # — the periodic seam succeeded. Reset the periodic counter.
+        self._periodic_failures.record_success()
 
     def _execute_force_close(self, order: ForceCloseOrder) -> None:
         from feed.ig_rest.types import CloseRequest  # local import keeps top tight
@@ -592,11 +731,22 @@ class BotLoop:
                 order.position_id,
             )
             return
-        opposite = "SELL" if position.direction == Direction.BULLISH else "BUY"
+        # C1 (adversarial review 2026-05-15): CloseRequest.position_direction
+        # holds the position's OWN direction. The wrapper in
+        # feed.ig_rest.positions.close_position inverts internally before
+        # talking to IG. Pre-inverting here used to cause double inversion
+        # → IG received the position's original side → opened a same-side
+        # position instead of closing → doubled exposure on every EOD
+        # flatten. Match the executor's emergency-close path
+        # (src/execution/executor.py:216-227) which passes the position's
+        # own direction directly.
+        own_direction = (
+            "BUY" if position.direction == Direction.BULLISH else "SELL"
+        )
         request = CloseRequest(
             deal_id=position.deal_id,
             epic=self._pair_to_epic[position.pair],
-            position_direction=opposite,
+            position_direction=own_direction,
             size=position.size_units,
         )
         confirmation = self._client.close_position(request)
