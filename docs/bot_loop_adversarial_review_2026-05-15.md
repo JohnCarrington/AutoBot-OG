@@ -773,3 +773,337 @@ Suggested sequence:
 
 Once C1/C2/H1 are fixed and pinned by tests, this is a quick path to
 APPROVE FOR MERGE.
+
+---
+
+# Addendum — re-review pass on `feature/bot-loop` @ `a8766d6`
+
+- **Branch reviewed:** `feature/bot-loop`
+  - `63045b8` — WIP snapshot of the original (buggy) state
+  - `a8766d6` — fix pass under review
+- **Base:** `develop` (`e977521` after Phase 7 cleanup)
+- **Date:** 2026-05-15
+- **Reviewer:** AutoBot-OG (read-only verification pass)
+- **Test status:** `717 passed in 3.96s` — full suite green and
+  matches the commit claim. `bot.loop` subset is 33 tests (was 20;
+  13 new tests cover C1×2, C2×4, H1×2, H3, M2, M6, plus mark_ready
+  lifecycle).
+
+## Disposition of original findings
+
+| ID | Status | Note |
+|----|--------|------|
+| **C1** Force-close wrong direction | **FIXED** | `_execute_force_close` now passes `position.direction` as-is. Two regression tests pin both BULLISH→"BUY" and BEARISH→"SELL". `_FakeIGClient.close_position` now asserts on `position_direction`. |
+| **C2** RiskGuard reads stale engine | **FIXED** | `RiskGuard` accepts `engine_for_pair` callable; `BotLoop` accepts `regime_engines` dict; `bot.main._build_runtime` constructs one map and hands the SAME instances to both. Identity test pins the wiring. Phase 4 single-engine callers unchanged. |
+| **H1** Partial trailing H1 bar | **FIXED** | `_derive_and_enrich_h1` accepts `m5_close_time` and trims the last bin when `minute != 0`. Two tests pin mid-hour trim and on-boundary keep. |
+| **H2** No feature branch | **RESOLVED** | `feature/bot-loop` exists at `a8766d6` with proper commits. |
+| **H3** Force-close never records success | **FIXED** | `_maybe_force_close_orders` now calls `record_success()` on both the no-op and the post-iteration paths. Regression test pins it. |
+| **H4** Premature NORMAL on `start()` | **FIXED** | `start()` keeps state at `STARTING`; new `mark_ready()` flips to `NORMAL`; `bot.main.main` calls it after `verify_subscriptions`. Three new tests cover the lifecycle. |
+| **M1** Daily-DD permanently disabled | **DOCUMENTED** | `MODULE.md` v1-simplifications section now spells out the limitation, and `BotLoop.__init__` logs a WARNING at construction. Behaviour unchanged — deferred to Phase 9+ per design. |
+| **M2** Event counter resets on no-op kinds | **FIXED** | Only `BAR_CLOSE` resets the counter now. Regression test pins both `BAR_UPDATE` and `FEED_STALE` as non-resetters. |
+| **M3** Per-order force-close failures invisible | **DEFERRED** | Author chose not to add a counter — comment in source justifies as "broker-IO". See §"Deferred items" below. |
+| **M4** Open-from-signal failures silent | **DEFERRED** | Same reasoning as M3. |
+| **M5** Test name mismatch | **FIXED** | Renamed to `test_periodic_failure_path_does_not_bump_event_counter` with corrected comment. |
+| **M6** STARTING events not gated | **FIXED** | `_handle_feed_event` now short-circuits both `STARTING` and `SHUTTING_DOWN`. Regression test pins it. |
+| **L1** Premature state set | **FIXED** | Folded into H4. |
+| **L2** start() ordering robustness | **DEFERRED** | Trivial; not blocking. |
+| **L3** Comment-vs-code drift | **DEFERRED** | Trivial. |
+| **L4** `_LateSubscriber` style | **FIXED** | Renamed `_LateSubscriberView`, added `__slots__`. |
+| **L5** Signal handler enum lookup | **DEFERRED** | Trivial. |
+
+## Verifications
+
+### C1 — force-close direction (both polarities through both layers)
+
+```
+BULLISH (BUY position):
+  BotLoop sets request.position_direction = BUY
+  Wrapper sends to IG: direction = SELL    ← correct to close a BUY
+BEARISH (SELL position):
+  BotLoop sets request.position_direction = SELL
+  Wrapper sends to IG: direction = BUY     ← correct to close a SELL
+```
+
+Walk-through:
+
+- `src/bot/loop.py:736-744` — `own_direction = "BUY" if BULLISH else "SELL"`.
+- `src/feed/ig_rest/positions.py:89` — wrapper computes
+  `opposite = "SELL" if close.position_direction == "BUY" else "BUY"`.
+- Combined: wire-level direction is always the opposite of the
+  position's, which is the IG semantic to close.
+
+The mask in the original test (`_FakeIGClient.close_position`
+accepting any direction silently) is gone — the fake now asserts
+the value is `"BUY"`/`"SELL"` and records it for the regression
+tests:
+
+```python
+# tests/unit/test_bot_loop.py:128-132
+assert request.position_direction in ("BUY", "SELL"), (
+    f"CloseRequest.position_direction must be BUY/SELL; "
+    f"got {request.position_direction!r}"
+)
+```
+
+Two regression tests pin the polarity:
+`test_force_close_passes_position_own_direction_bullish` and
+`test_force_close_passes_position_own_direction_bearish`.
+
+### C2 — engine sharing through `engine_for_pair`
+
+The fix introduces a two-mode constructor:
+
+- Legacy single-engine form: `RiskGuard(engine=eng)` — Phase 4 tests
+  unchanged (verified: `test_risk_guard_falls_back_to_single_engine_when_callable_not_provided` and 90/90 risk tests pass).
+- Multi-pair form: `RiskGuard(engine_for_pair=lambda p: engines[p])`
+  — `BotLoop` constructor accepts `regime_engines` dict, `bot.main`
+  builds it once and hands the dict to BOTH:
+
+```python
+# bot/main.py
+regime_engines = {p: RegimeEngine() for p in config.pairs}
+risk_guard = RiskGuard(engine_for_pair=lambda pair: regime_engines[pair])
+bot = BotLoop(..., regime_engines=regime_engines, ...)
+```
+
+Identity check (regression test
+`test_bot_loop_and_risk_guard_share_engine_instance_identity`):
+
+```python
+assert bot.regime_engine_for("GBPUSD") is engines["GBPUSD"]
+assert pieces["risk"]._engine_for_pair("GBPUSD") is engines["GBPUSD"]
+```
+
+Routing check (`test_risk_guard_routes_to_correct_pair_engine`)
+exercises `_evaluate_and_execute` with a `Signal(pair="GBPUSD")`
+and asserts the fake recorded `("GBPUSD", …)` as the routed pair.
+
+The defensive `_resolve_engine` (`src/risk/guard.py:111-126`) raises
+on `None` from the callable; `engine` property raises a friendly
+error when only the callable form was wired. Both rejection paths
+have tests.
+
+**`engine_for_pair("UNKNOWN_PAIR")` behaviour** — the lambda
+constructed by `bot.main` does `regime_engines[pair]` which raises
+`KeyError`. `_resolve_engine` doesn't catch it (it only checks for
+`None`), so the KeyError propagates. Callers:
+
+- `allow_entry`: candidate.pair is always one the BotLoop generated
+  signals for, so the pair is guaranteed in the engine map. No risk.
+- `positions_to_force_close`: iterates pairs from positions handed
+  in by `_collect_open_positions`, which reads `PositionManager.all()`.
+  If a stale position from a prior session has a pair removed from
+  `config.pairs`, KeyError propagates. The BotLoop's outer try/except
+  catches and bumps `_periodic_failures`. After 5 strikes the bot
+  shuts down — same as any other persistent periodic failure.
+
+I'd flag this as a LOW-severity edge case (see §"New findings" below).
+
+### H1 — partial-bar trim
+
+Verified empirically:
+
+```
+A: m5_close=13:35 (mid-hour). H1 bars after trim:
+   [Timestamp('2026-05-15 13:00:00+0000', tz='UTC')]    ← partial 14:00 dropped
+B: m5_close=13:00 (boundary). H1 bars after trim:
+   [Timestamp('2026-05-15 13:00:00+0000', tz='UTC')]    ← just-closed 13:00 kept
+```
+
+Code (`src/bot/loop.py:570-580`):
+
+```python
+if m5_close_time.minute != 0:
+    # The latest bin is the in-progress H1 — trim it.
+    agg = agg.iloc[:-1]
+```
+
+**Edge: m5_close exactly on hour.** At `minute=0` the M5 bar that
+just closed (e.g. 12:55→13:00) lands in the 13:00 H1 bin AS THE
+12th contribution — that bin is now complete. The trim condition
+correctly evaluates `False` and the bar is kept. ✓
+
+The test seam `_h1_for_test(pair, m5_close_time=…)` exposes the
+exact computation without firing a full event.
+
+**Performance:** the trim is `agg.iloc[:-1]` on an already-computed
+DataFrame. Cost is one slice (constant time, returns a view).
+Negligible per BAR_CLOSE.
+
+### H3 — both reconcile and force-close reset symmetrically
+
+```python
+# _maybe_reconcile (already correct pre-fix):
+self._periodic_failures.record_success()  # on clean reconcile
+
+# _maybe_force_close_orders (fixed):
+if not orders:
+    self._periodic_failures.record_success()  # no-op path
+    return
+...
+for order in orders:
+    try: ...
+    except Exception: logger.exception(...)
+self._periodic_failures.record_success()  # post-iteration path
+```
+
+Walk-through against the pathological pattern from the original
+review:
+
+| t | event | reconcile result | force-close result | periodic counter |
+|---|-------|------------------|--------------------|-------------------|
+| 0 | BAR_CLOSE | fail (10-min gate elapses) | clean | reconcile=1, force_close resets to 0 |
+| 5 | BAR_CLOSE | not run (gate) | clean | 0 |
+| 10 | BAR_CLOSE | fail | clean | 1 → 0 |
+
+Before the fix the column would be `1, 1, 2` — would trip after 5
+× 10-min cycles. After the fix it never accumulates if force-close
+keeps working. Regression test
+`test_periodic_failures_reset_on_clean_force_close` pins this.
+
+### H4 — STARTING → mark_ready → NORMAL lifecycle
+
+`main.py` flow:
+
+```python
+bot.hydrate()
+bot.start()                        # state stays STARTING
+sub_check = verify_subscriptions(...)
+if not sub_check.ok:
+    bot.stop(...)                  # request_shutdown → SHUTTING_DOWN
+    return 1
+bot.mark_ready()                   # state → NORMAL
+bot.shutdown_event().wait()
+```
+
+**Failed-subscription path:** `verify_subscriptions` returns
+`ok=False`. `bot.stop()` calls `request_shutdown()` which sets
+state to `SHUTTING_DOWN` regardless of prior state. main returns 1.
+No events were processed during STARTING (handler short-circuits).
+Clean.
+
+**Signal-during-STARTING path:** SIGTERM arrives between `start()`
+and `mark_ready()`. The handler calls `request_shutdown()` →
+state=`SHUTTING_DOWN`. Main proceeds to call `mark_ready()` which
+no-ops because `state != STARTING`. Then `shutdown_event().wait()`
+returns immediately (event was set). Drain runs. Returns 0 or 2.
+Verified mark_ready is idempotent
+(`test_mark_ready_is_idempotent_and_no_op_after_transition`).
+
+### M2, M5, M6 — bundled MEDIUMs
+
+- **M2** event counter — `is_real_work = event.kind is FeedEventKind.BAR_CLOSE`
+  gates the success call. Regression test fires a BAR_UPDATE and a
+  FEED_STALE after a prior failure-record and asserts the counter
+  stays at 1.
+- **M5** test rename — `test_event_failure_counter_increments_on_exception`
+  → `test_periodic_failure_path_does_not_bump_event_counter`.
+  Body unchanged but the name/comment now match the assertion.
+- **M6** STARTING-state events — `_handle_feed_event` first line is
+  now `if self._state in (BotState.STARTING, BotState.SHUTTING_DOWN): return`.
+  Regression test pins it.
+
+### Test-fake hardening
+
+Both fakes the original review flagged as masks are now load-bearing:
+
+- `_FakeIGClient.close_position` asserts direction (tests/unit/test_bot_loop.py:128-132).
+- `_FakeRiskGuard` now mirrors the real surface — `allow_entry` and
+  `positions_to_force_close` actually call `engine.is_live()` and
+  `engine.get_recent_emissions(...)`, with a per-call `(pair,
+  is_live, recent_count)` record so routing assertions are direct
+  (`observed_engine_lookups`).
+
+The test-design lesson is now codified in fake docstrings ("The
+existence of this assertion (rather than blanket acceptance) is
+the lesson from C1.").
+
+## New issues introduced by the fixes
+
+Two LOW-severity edges; neither blocks merge.
+
+### N1 (LOW — error surface) — `engine_for_pair` raises KeyError on stale-pair positions; bot trips the periodic counter instead of recovering
+
+**File:** `src/risk/guard.py:111-124`, `src/bot/main.py:181-185`
+
+`bot.main` wires `engine_for_pair=lambda pair: regime_engines[pair]`.
+If a `PositionManager`-loaded position carries a pair removed from
+`config.pairs` (operator removed a pair from `BOT_PAIRS`), the lambda
+raises `KeyError`. `_resolve_engine` doesn't catch it. The
+`positions_to_force_close` call inside `_maybe_force_close_orders`
+raises, the outer try/except converts to `_periodic_failures.record_failure`,
+and after 5 consecutive BAR_CLOSEs the bot shuts down with exit 2.
+
+This is *not* wrong behaviour — a stale position the bot can't act
+on IS a real problem — but the user-facing log says "periodic seam
+failed" rather than the cleaner "stale position for unconfigured
+pair". A defensive `try/except KeyError` in the lambda (or in
+`_resolve_engine`) that logs the pair name once would be a small
+quality-of-life improvement.
+
+**Suggested fix:** swallow KeyError in
+`bot.main._build_runtime`'s lambda and log a single warning:
+
+```python
+def _engine_for_pair(pair: str) -> RegimeEngine:
+    eng = regime_engines.get(pair)
+    if eng is None:
+        raise RuntimeError(
+            f"No regime engine for pair {pair!r} — orphaned position "
+            f"from prior session? Remove via PositionManager or add "
+            f"the pair back to BOT_PAIRS."
+        )
+    return eng
+```
+
+Not blocking.
+
+### N2 (LOW — log spam) — `BotLoop.__init__` always logs WARNING about M1, even in tests
+
+**File:** `src/bot/loop.py:227-237`
+
+The realized-PnL warning fires on every construction. In a busy test
+suite (33 BotLoop builds) the test log captures 33 copies. Pytest
+captures stderr by default so this doesn't visibly leak — but ops
+dashboards that key on WARNING counts will see a 1-per-startup
+heartbeat that's actually a documentation note, not an alert.
+
+**Suggested fix:** demote to `logger.info` (it's a v1 limitation
+note, not an actionable warning), or gate behind an env var so
+tests can suppress.
+
+Not blocking.
+
+## Deferred items the fix pass did NOT include
+
+The author deferred M3, M4, L2, L3, L5 to follow-up commits. My read:
+
+- **M3 / M4** (silent broker-IO failures on force-close and open) —
+  defensible deferral. The source comments document the design
+  choice. v1 operates on a single-pair, modest-cadence bot; a
+  systematic broker outage will surface via reconcile failures
+  (which DO count) or the watchdog. Defer.
+- **L2, L3, L5** — all trivial. Defer.
+- **A4 from the Phase 7 review** (parallel gap-fill) was also
+  deferred. Not in scope for Phase 8.
+
+No deferred item rises to the level that blocks merge.
+
+## Final recommendation
+
+**APPROVE FOR MERGE.**
+
+All five HIGH/CRITICAL items (C1, C2, H1, H3, H4) are fixed with
+regression tests that exercise the bug paths directly. M1 is
+documented as a known v1 limitation with a runtime WARNING. M2 is
+fixed. M5 / M6 / L1 / L4 are cleaned up. Test fakes are now
+contract-checking rather than smoke-testing — the lessons from C1
+and C2 are codified in the fake assertions.
+
+The two new LOW findings (N1: KeyError on stale-pair positions; N2:
+WARNING spam) can land in a follow-up commit without blocking the
+merge.
+
+Suite stable at 717 (704 + 13 new). Phase 4 single-engine RiskGuard
+callers unchanged (90/90 risk tests green). Ready to land on
+`develop`.
