@@ -58,9 +58,14 @@ class TelegramClient:
     Parameters
     ----------
     bot_token, chat_id : str
-        Credentials. Empty strings here would still produce a callable
-        client — the caller (:py:class:`TelegramAlerter`) is expected
-        to handle the no-credentials path before constructing one.
+        Credentials. The constructor does NOT validate them — passing
+        an empty string here produces an object whose :py:meth:`send`
+        will POST to ``/bot/sendMessage`` and get a 404. The
+        no-credentials path is :py:class:`TelegramAlerter`'s
+        responsibility: it checks the env vars before constructing
+        this client and short-circuits to no-op mode if either is
+        missing. L2 (Phase 9 review): the prior docstring read as if
+        empty strings were a supported call shape — they're not.
     timeout_sec : float, optional
         HTTP request timeout. Defaults to
         :data:`ALERTS_HTTP_TIMEOUT_SEC`.
@@ -113,7 +118,7 @@ class TelegramClient:
             # ``_TOKEN_PATTERN`` comment at module top for the why.
             scrubbed = _scrub_exception_text(str(exc))
             logger.warning(
-                "Telegram delivery failed (%s: %s) — alert text: %s",
+                "Telegram delivery failed (%s: %s) - alert text: %s",
                 type(exc).__name__,
                 scrubbed,
                 _truncate(text),
@@ -123,7 +128,7 @@ class TelegramClient:
         status = getattr(response, "status_code", None)
         if status is None or not (200 <= status < 300):
             logger.warning(
-                "Telegram API returned non-2xx (status=%s) — alert text: %s",
+                "Telegram API returned non-2xx (status=%s) - alert text: %s",
                 status,
                 _truncate(text),
             )
