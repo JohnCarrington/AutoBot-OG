@@ -457,3 +457,245 @@ def test_apply_amend_rejected_status_returns_failure(tmp_path: Path) -> None:
     )
     assert result.success is False
     assert "broker_rejected" in result.reason
+
+
+# ---------------------------------------------------------------------------
+# Phase 9 commit 2b — Executor alerter wiring
+# ---------------------------------------------------------------------------
+
+
+class _RecordingAlerter:
+    """Test alerter that just records sent alerts."""
+
+    def __init__(self) -> None:
+        self.sent: list = []
+
+    def send(self, alert) -> None:
+        self.sent.append(alert)
+
+    def tick(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def _make_executor_with_alerter(
+    tmp_path: Path,
+) -> tuple[Executor, _FakeIGClient, PositionManager, _RecordingAlerter]:
+    mgr = PositionManager(PositionsState(path=tmp_path / "p.json"))
+    fake = _FakeIGClient()
+    alerter = _RecordingAlerter()
+
+    exec_ = Executor(
+        position_manager=mgr,
+        client=fake,  # type: ignore[arg-type]
+        epic_resolver=lambda pair: f"CS.D.{pair}.TODAY.IP",
+        clock=lambda: _TS,
+        sleep=lambda s: None,
+        alerter=alerter,  # type: ignore[arg-type]
+    )
+    return exec_, fake, mgr, alerter
+
+
+def test_open_from_signal_emits_trade_opened_on_success(tmp_path: Path) -> None:
+    """TRADE_OPENED is INFO + TRADE category, fires only on success path."""
+    executor, fake, _, alerter = _make_executor_with_alerter(tmp_path)
+    fake.queue_open(_accept())
+    executor.open_from_signal(_ig_signal())
+    assert len(alerter.sent) == 1
+    alert = alerter.sent[0]
+    from alerts import AlertCategory, AlertSeverity
+    assert alert.event_subtype == "TRADE_OPENED"
+    assert alert.severity is AlertSeverity.INFO
+    assert alert.category is AlertCategory.TRADE
+    assert alert.pair == "GBPUSD"
+    assert "BUY" in alert.full_text
+    assert alert.timestamp == _TS
+
+
+def test_open_from_signal_no_alert_on_broker_rejection(tmp_path: Path) -> None:
+    """Broker rejection: no TRADE_OPENED alert, returns failure result."""
+    executor, fake, _, alerter = _make_executor_with_alerter(tmp_path)
+    fake.queue_open(_rejected("REJECTED_BY_MARKET"))
+    result = executor.open_from_signal(_ig_signal())
+    assert result.success is False
+    assert alerter.sent == []
+
+
+def test_open_from_signal_no_alert_on_allowance_exceeded(tmp_path: Path) -> None:
+    executor, fake, _, alerter = _make_executor_with_alerter(tmp_path)
+    fake.queue_open_exception(AllowanceExceeded(recommended_sleep_seconds=60.0))
+    result = executor.open_from_signal(_ig_signal())
+    assert result.success is False
+    assert alerter.sent == []
+
+
+def test_open_from_signal_no_alert_on_duplicate_signal(tmp_path: Path) -> None:
+    """Idempotency hit: same source bar → no second TRADE_OPENED. The
+    duplicate-signal-silently-reused path must NOT re-alert (would spam
+    the chat on retries / re-deliveries)."""
+    executor, fake, _, alerter = _make_executor_with_alerter(tmp_path)
+    fake.queue_open(_accept())
+    executor.open_from_signal(_ig_signal())
+    assert len(alerter.sent) == 1
+    # Re-deliver the same signal — idempotency reuses the existing position.
+    executor.open_from_signal(_ig_signal())
+    assert len(alerter.sent) == 1, "duplicate signal must not re-alert"
+
+
+def test_apply_amend_emits_amend_failed_on_double_rejection(tmp_path: Path) -> None:
+    """Both attempts rejected → AMEND_FAILED (WARNING)."""
+    executor, fake, _, alerter = _make_executor_with_alerter(tmp_path)
+    fake.queue_open(_accept())
+    executor.open_from_signal(_ig_signal())
+    alerter.sent.clear()
+    fake.queue_amend(_rejected("MARKET_OFFLINE"))
+    fake.queue_amend(_rejected("MARKET_OFFLINE"))
+    result = executor.apply_amend(
+        AmendOrder(deal_id="D1", new_sl_price=1.30010, reason="be_move_at_1r")
+    )
+    assert result.success is False
+    failed = [a for a in alerter.sent if a.event_subtype == "AMEND_FAILED"]
+    assert len(failed) == 1
+    from alerts import AlertCategory, AlertSeverity
+    assert failed[0].severity is AlertSeverity.WARNING
+    assert failed[0].category is AlertCategory.TRADE
+    assert failed[0].pair == "GBPUSD"
+    assert "D1" in failed[0].full_text
+
+
+def test_apply_amend_no_alert_on_success(tmp_path: Path) -> None:
+    """Successful amend (first try) should NOT emit AMEND_FAILED."""
+    executor, fake, _, alerter = _make_executor_with_alerter(tmp_path)
+    fake.queue_open(_accept())
+    executor.open_from_signal(_ig_signal())
+    alerter.sent.clear()
+    fake.queue_amend(_accept())
+    result = executor.apply_amend(
+        AmendOrder(deal_id="D1", new_sl_price=1.30010, reason="be_move_at_1r")
+    )
+    assert result.success is True
+    failed = [a for a in alerter.sent if a.event_subtype == "AMEND_FAILED"]
+    assert failed == []
+
+
+def test_apply_amend_no_alert_when_unknown_position(tmp_path: Path) -> None:
+    """Unknown deal_id is a fast-fail without broker contact — no
+    AMEND_FAILED alert (it's a programmer error / stale deal_id, not
+    a broker rejection the operator needs to know about via Telegram)."""
+    executor, _, _, alerter = _make_executor_with_alerter(tmp_path)
+    result = executor.apply_amend(
+        AmendOrder(deal_id="NOPE", new_sl_price=1.0, reason="trail_active")
+    )
+    assert result.success is False
+    assert alerter.sent == []
+
+
+def test_executor_without_alerter_open_does_not_raise(tmp_path: Path) -> None:
+    """Default constructor (no alerter) keeps existing tests' contract
+    — no AttributeError on the trade-opened path."""
+    executor, fake, _ = _make_executor(tmp_path)
+    fake.queue_open(_accept())
+    result = executor.open_from_signal(_ig_signal())
+    assert result.success is True
+
+
+def test_executor_without_alerter_amend_failure_does_not_raise(tmp_path: Path) -> None:
+    executor, fake, _ = _make_executor(tmp_path)
+    fake.queue_open(_accept())
+    executor.open_from_signal(_ig_signal())
+    fake.queue_amend(_rejected("X"))
+    fake.queue_amend(_rejected("X"))
+    result = executor.apply_amend(
+        AmendOrder(deal_id="D1", new_sl_price=1.30010, reason="be_move_at_1r")
+    )
+    assert result.success is False
+
+
+def test_apply_amend_persist_failure_emits_critical_and_raises(
+    tmp_path: Path, monkeypatch, caplog,
+) -> None:
+    """H1 (Session-3 commit-2b review): broker accepts amend, local
+    upsert fails (e.g. ENOSPC). The executor must:
+    - log CRITICAL describing the divergence,
+    - emit a CRITICAL ``AMEND_PERSIST_FAILED`` alert (bypasses
+      coalescing — operator gets it immediately),
+    - re-raise the original persistence error so the caller can
+      shut the bot down rather than continue with desynced state.
+    """
+    import logging
+
+    executor, fake, mgr, alerter = _make_executor_with_alerter(tmp_path)
+    fake.queue_open(_accept())
+    executor.open_from_signal(_ig_signal())
+    alerter.sent.clear()
+
+    # Broker ACCEPTS the amend on first try.
+    fake.queue_amend(_accept())
+
+    # ...but the upsert that should follow blows up.
+    original_upsert = mgr.upsert
+    upsert_calls: list = []
+
+    def _boom(pos):
+        # First call (from open_from_signal) was already done; this
+        # is the amend-time upsert we want to fail.
+        upsert_calls.append(pos)
+        raise OSError("ENOSPC: no space left on device")
+
+    monkeypatch.setattr(mgr, "upsert", _boom)
+
+    with caplog.at_level(logging.CRITICAL, logger="execution.executor"):
+        with pytest.raises(OSError, match="ENOSPC"):
+            executor.apply_amend(
+                AmendOrder(
+                    deal_id="D1",
+                    new_sl_price=1.30010,
+                    reason="be_move_at_1r",
+                )
+            )
+
+    # CRITICAL log entry describing the divergence.
+    crit_msgs = [
+        r.message for r in caplog.records if r.levelno == logging.CRITICAL
+    ]
+    assert any("STATE DIVERGED" in m for m in crit_msgs)
+    assert any("D1" in m for m in crit_msgs)
+
+    # CRITICAL alert dispatched (bypasses coalescer).
+    from alerts import AlertCategory, AlertSeverity
+    persist_alerts = [
+        a for a in alerter.sent if a.event_subtype == "AMEND_PERSIST_FAILED"
+    ]
+    assert len(persist_alerts) == 1
+    alert = persist_alerts[0]
+    assert alert.severity is AlertSeverity.CRITICAL
+    assert alert.category is AlertCategory.TRADE
+    assert alert.pair == "GBPUSD"
+    assert "STATE DIVERGED" in alert.full_text
+    assert "D1" in alert.full_text
+    assert alert.debug["broker_new_sl"] == 1.30010
+
+
+def test_apply_amend_persist_failure_no_alerter_still_raises(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Without an alerter, the persist failure still re-raises so the
+    caller can crash. The alert path is just skipped silently."""
+    executor, fake, mgr = _make_executor(tmp_path)
+    fake.queue_open(_accept())
+    executor.open_from_signal(_ig_signal())
+    fake.queue_amend(_accept())
+
+    def _boom(pos):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(mgr, "upsert", _boom)
+
+    with pytest.raises(OSError, match="disk full"):
+        executor.apply_amend(
+            AmendOrder(
+                deal_id="D1", new_sl_price=1.30010, reason="be_move_at_1r",
+            )
+        )

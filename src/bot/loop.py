@@ -57,12 +57,17 @@ from typing import Any, Callable, Iterable, Optional
 
 import pandas as pd
 
+from alerts import Alert, AlertCategory, AlertSeverity, TelegramAlerter
 from config.pair_config import pair_from_epic, pip_size_for
 from execution.executor import Executor
 from execution.position_manager import PositionManager
 from execution.reconciliation import ReconciliationOutcome, reconcile
 from execution.sl_management import evaluate_sl_amend
-from execution.types import ExecutionPosition
+from execution.types import (
+    ExecutionPosition,
+    ReconciliationEvent,
+    ReconciliationKind,
+)
 from feed.feed_manager import FeedManager
 from feed.ig_rest.client import IGClient
 from feed.ig_rest.markets import fetch_market_info
@@ -101,6 +106,14 @@ logger = logging.getLogger(__name__)
 # that the daily-DD circuit breaker won't false-fire from the default.
 _DEFAULT_BALANCE = 10_000.0
 _DEFAULT_CURRENCY = "GBP"
+
+# M1 (Session-3 commit-2b review): bound the in-memory deal log so it
+# doesn't grow unbounded across long-running sessions. 200 entries is
+# ~20 trading days at 10 closes/day — generous compared with the
+# reconciliation cadence (every BOT_RECONCILIATION_INTERVAL_MIN) that
+# normally drains entries via the action-application sweep. Insertion
+# order matters (Python 3.7+ dict is ordered) so prune-oldest works.
+_RECENT_CLOSES_MAX = 200
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +179,7 @@ class BotLoop:
         account_currency: str = _DEFAULT_CURRENCY,
         clock: Optional[Callable[[], datetime]] = None,
         regime_engines: Optional[dict[str, RegimeEngine]] = None,
+        alerter: Optional[TelegramAlerter] = None,
     ) -> None:
         self._feed = feed_manager
         self._client = ig_client
@@ -177,6 +191,14 @@ class BotLoop:
         self._account_balance = account_balance
         self._account_currency = account_currency
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._alerter = alerter
+        # In-memory deal log: deal_id -> {pair, reason, closed_at_utc}.
+        # Populated by _execute_force_close on broker-accepted closes so
+        # the next reconciliation pass classifies the now-missing local
+        # position as POSITION_CLOSED (clean) rather than
+        # MISSING_LOCAL_KEPT (alert). v1 keeps it in memory; persistence
+        # would require a deal-log file alongside positions.json.
+        self._recent_closes: dict[str, dict] = {}
 
         self._state: BotState = BotState.STARTING
         # One regime engine per pair (v1: per-pair regime). Callers
@@ -241,7 +263,13 @@ class BotLoop:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def hydrate(self) -> None:
+    def hydrate(self) -> dict:
+        """Hydrate every pair; return a summary dict for the STARTUP alert.
+
+        Returns ``{"cached_bars": <int>, "rest_bars": <int>}`` summed
+        across all per-pair reports. Raises on failure (preserves the
+        prior contract).
+        """
         report = self._feed.hydrate()
         logger.info(
             "Hydration complete: ok=%s, failed_pairs=%s, degraded_pairs=%s",
@@ -253,6 +281,10 @@ class BotLoop:
             raise RuntimeError(
                 f"Hydration failed for pairs: {list(report.failed_pairs)}"
             )
+        return {
+            "cached_bars": sum(p.cached_bars for p in report.per_pair),
+            "rest_bars": sum(p.rest_bars for p in report.per_pair),
+        }
 
     def start(self) -> None:
         """Register the event callback and open the LS subscription.
@@ -283,20 +315,47 @@ class BotLoop:
         self._state = BotState.NORMAL
         logger.info("BotLoop entered state NORMAL")
 
-    def request_shutdown(self) -> None:
+    def request_shutdown(self, reason: Optional[str] = None) -> None:
         """Signal the main thread that a graceful shutdown is in progress.
 
         Thread-safe (sets a :class:`threading.Event`). The LS reader
         thread continues to fire callbacks until ``stop()`` actually
         disconnects, but those callbacks short-circuit when
         ``_state == SHUTTING_DOWN``.
+
+        Parameters
+        ----------
+        reason
+            Optional failure description. ``None`` indicates an
+            external/signal-driven shutdown (SIGTERM/SIGINT,
+            preflight failure) — no Telegram alert is emitted because
+            the operator already knows. A non-``None`` value indicates
+            an internal failure (5-strike event-failure trip,
+            5-strike periodic-failure trip) and triggers a CRITICAL
+            ``FAILURE_THRESHOLD_TRIPPED`` alert. CRITICAL bypasses
+            coalescing so the alert ships before the shutdown drain
+            tears the connection down.
         """
         if self._state == BotState.SHUTTING_DOWN:
             return
         prev = self._state
         self._state = BotState.SHUTTING_DOWN
         self._shutdown_requested.set()
-        logger.warning("Shutdown requested (prev_state=%s)", prev.value)
+        logger.warning(
+            "Shutdown requested (prev_state=%s, reason=%s)",
+            prev.value,
+            reason if reason is not None else "external",
+        )
+        if reason is not None:
+            self._send_alert(
+                category=AlertCategory.SYSTEM,
+                event_subtype="FAILURE_THRESHOLD_TRIPPED",
+                severity=AlertSeverity.CRITICAL,
+                pair=None,
+                full_text=f"Bot failure threshold tripped: {reason}",
+                short_text=reason,
+                debug={"prev_state": prev.value, "reason": reason},
+            )
 
     def shutdown_event(self) -> threading.Event:
         """Return the threading.Event the main thread blocks on."""
@@ -340,6 +399,20 @@ class BotLoop:
             logger.info("Position state save_if_dirty returned %s", saved)
         except Exception:
             logger.exception("BotLoop.stop: position state flush failed")
+
+        # Close the alerter BEFORE feed_manager.stop. The alerter's
+        # close() drains pending coalesced groups so the operator
+        # receives the final SHUTDOWN alert (queued by bot.main just
+        # before calling stop()) along with any other in-flight
+        # batches. After close(), late send() calls are rejected with
+        # a WARNING (L5 from Phase 9 review). Closing before the LS
+        # disconnect means the Telegram POST has the same ~5s timeout
+        # window it would in steady state.
+        if self._alerter is not None:
+            try:
+                self._alerter.close()
+            except Exception:
+                logger.exception("BotLoop.stop: alerter.close raised")
 
         try:
             self._feed.stop()
@@ -419,7 +492,12 @@ class BotLoop:
                     "shutdown",
                     self._event_failures.consecutive,
                 )
-                self.request_shutdown()
+                self.request_shutdown(
+                    reason=(
+                        f"{self._event_failures.consecutive} consecutive "
+                        f"event failures"
+                    )
+                )
             return
         if is_real_work:
             # Only BAR_CLOSE represents "successful work" — no-op kinds
@@ -429,10 +507,34 @@ class BotLoop:
     def _dispatch_event(self, event: FeedEvent) -> None:
         kind = event.kind
         if kind is FeedEventKind.FEED_STALE:
+            # Transition FIRST, then alert. The alert text describes
+            # the actual current state; sending before the transition
+            # would risk a "FEED_STALE alert with state=NORMAL" if the
+            # transition logic ever short-circuits. tick() flushes
+            # any pending coalesced groups so the operator sees the
+            # transition without waiting for the next BAR_CLOSE.
             self._transition(BotState.STALE, reason="FEED_STALE")
+            self._send_alert(
+                category=AlertCategory.SYSTEM,
+                event_subtype="FEED_STALE",
+                severity=AlertSeverity.WARNING,
+                pair=None,
+                full_text="Live feed went stale — signal generation paused",
+                short_text="feed stale",
+            )
+            self._tick_alerter()
             return
         if kind is FeedEventKind.FEED_RESUMED:
             self._transition(BotState.RESUMING, reason="FEED_RESUMED")
+            self._send_alert(
+                category=AlertCategory.SYSTEM,
+                event_subtype="FEED_RESUMED",
+                severity=AlertSeverity.INFO,
+                pair=None,
+                full_text="Live feed resumed — gap-fill in progress",
+                short_text="feed resumed",
+            )
+            self._tick_alerter()
             return
         if kind is FeedEventKind.GAP_FILLED:
             # Note: the per-bar BAR_CLOSE events generated by gap-fill
@@ -511,6 +613,10 @@ class BotLoop:
         # 5. SL evaluation per open position (BAR_CLOSE cadence, design
         #    decision #1 — not BAR_UPDATE, not separate timer).
         self._run_sl_evaluation(pair, df_m5_enriched, candle)
+
+        # 6. Tick the alerter — flushes any coalesced groups whose
+        #    30s window elapsed during this bar's processing.
+        self._tick_alerter()
 
     # ------------------------------------------------------------------
     # DataFrame plumbing
@@ -635,8 +741,14 @@ class BotLoop:
         if elapsed < timedelta(minutes=BOT_RECONCILIATION_INTERVAL_MIN):
             return
         try:
-            self._with_inflight_tracked(self._reconcile_once)
+            outcome = self._with_inflight_tracked(self._reconcile_once)
             self._periodic_failures.record_success()
+            # Dispatch alerts only after applying actions so the
+            # operator sees the same view the bot acted on. INFO-level
+            # reconciliation events (OK_NO_OP, SL_UPDATED_FROM_BROKER,
+            # STALE_POSITION, SL_DRIFT_LARGE) are suppressed; only the
+            # operator-actionable kinds translate to alerts.
+            self._dispatch_reconciliation_alerts(outcome)
         except Exception as exc:
             self._periodic_failures.record_failure(exc, now_utc=self._clock())
             logger.exception(
@@ -654,6 +766,7 @@ class BotLoop:
         outcome = reconcile(
             manager=self._positions,
             broker_positions=broker_positions,
+            deal_confirmations_log=self._recent_closes or None,
             now_utc=self._clock(),
         )
         # Apply SL updates the reconciler suggests, then drop deal_ids
@@ -667,6 +780,12 @@ class BotLoop:
             )
         for deal_id in outcome.actions.remove_deal_ids:
             self._positions.remove(deal_id)
+            # Once a closed deal_id has been removed from local state
+            # AND the operator has been alerted (via TRADE_CLOSED in
+            # _dispatch_reconciliation_alerts), drop it from the deal
+            # log so it doesn't grow unbounded across reconciliation
+            # cycles.
+            self._recent_closes.pop(deal_id, None)
         return outcome
 
     def _maybe_force_close_orders(self) -> None:
@@ -756,6 +875,39 @@ class BotLoop:
                 "Force-close accepted: deal_id=%s pair=%s reason=%s",
                 position.deal_id, position.pair, order.reason,
             )
+            # Record in the deal log so the next reconciliation pass
+            # classifies the now-missing position as POSITION_CLOSED
+            # (clean) rather than MISSING_LOCAL_KEPT (alert). Even
+            # though we've already removed it locally, the broker may
+            # still surface it as missing on the next fetch — the log
+            # entry isn't strictly needed for alerting (we emit
+            # TRADE_CLOSED right here), but it keeps reconciliation
+            # alert noise down if races occur.
+            self._record_recent_close(
+                position.deal_id,
+                {
+                    "pair": position.pair,
+                    "reason": order.reason,
+                    "closed_at_utc": self._clock().isoformat(),
+                    "source": "force_close",
+                },
+            )
+            self._send_alert(
+                category=AlertCategory.TRADE,
+                event_subtype="TRADE_CLOSED",
+                severity=AlertSeverity.INFO,
+                pair=position.pair,
+                full_text=(
+                    f"{position.pair} closed by force-close "
+                    f"({order.reason}) deal_id={position.deal_id}"
+                ),
+                short_text=f"closed ({order.reason})",
+                debug={
+                    "deal_id": position.deal_id,
+                    "reason": order.reason,
+                    "source": "force_close",
+                },
+            )
         else:
             logger.warning(
                 "Force-close REJECTED by broker: deal_id=%s pair=%s "
@@ -771,7 +923,12 @@ class BotLoop:
                 "shutdown",
                 self._periodic_failures.consecutive,
             )
-            self.request_shutdown()
+            self.request_shutdown(
+                reason=(
+                    f"{self._periodic_failures.consecutive} consecutive "
+                    f"periodic failures"
+                )
+            )
 
     # ------------------------------------------------------------------
     # Signal pipeline
@@ -981,6 +1138,167 @@ class BotLoop:
     def inflight_count(self) -> int:
         with self._inflight_lock:
             return self._inflight_count
+
+    # ------------------------------------------------------------------
+    # Alerter helpers
+    # ------------------------------------------------------------------
+
+    def _record_recent_close(self, deal_id: str, info: dict) -> None:
+        """Insert a deal-log entry, pruning oldest if over the cap.
+
+        M1 (Session-3 commit-2b review): without a cap the dict grows
+        unbounded across long sessions. Prune-oldest is bounded
+        O(1) amortized because the dict is insertion-ordered and the
+        ``while`` loop only ever fires once per insert. The cap is
+        sized to outlast the typical reconciliation cadence by orders
+        of magnitude — a normal session drains entries when the
+        reconciler removes the deal_id (action-application sweep in
+        :py:meth:`_reconcile_once`).
+        """
+        self._recent_closes[deal_id] = info
+        while len(self._recent_closes) > _RECENT_CLOSES_MAX:
+            oldest = next(iter(self._recent_closes))
+            del self._recent_closes[oldest]
+
+    def _send_alert(
+        self,
+        *,
+        category: AlertCategory,
+        event_subtype: str,
+        severity: AlertSeverity,
+        pair: Optional[str],
+        full_text: str,
+        short_text: str,
+        debug: Optional[dict] = None,
+    ) -> None:
+        """Construct + dispatch an Alert. No-op if no alerter wired.
+
+        Swallows alerter exceptions: the alerter has its own
+        three-layer isolation (coalescer / formatter / client), but
+        unexpected raises here would otherwise propagate up the
+        BAR_CLOSE pipeline and trip the failure counter for what is
+        ultimately an observability path.
+        """
+        if self._alerter is None:
+            return
+        try:
+            self._alerter.send(
+                Alert(
+                    category=category,
+                    event_subtype=event_subtype,
+                    severity=severity,
+                    pair=pair,
+                    full_text=full_text,
+                    short_text=short_text,
+                    timestamp=self._clock(),
+                    debug=debug or {},
+                )
+            )
+        except Exception:
+            logger.exception(
+                "alerter.send raised (subtype=%s pair=%s)", event_subtype, pair,
+            )
+
+    def _tick_alerter(self) -> None:
+        """Tick the coalescer if wired. No-op + log on failure."""
+        if self._alerter is None:
+            return
+        try:
+            self._alerter.tick()
+        except Exception:
+            logger.exception("alerter.tick raised")
+
+    def _dispatch_reconciliation_alerts(
+        self, outcome: ReconciliationOutcome,
+    ) -> None:
+        """Translate operator-actionable reconciliation events to alerts.
+
+        Mapping (suppressed events not listed):
+
+        - ``POSITION_CLOSED`` → TRADE_CLOSED (INFO, TRADE)
+        - ``BROKER_ORPHAN`` → BROKER_ORPHAN (WARNING, RECONCILIATION)
+        - ``MISSING_LOCAL_KEPT`` → MISSING_LOCAL_KEPT (WARNING, RECONCILIATION)
+        - ``MANUAL_SL_MOVE`` → MANUAL_SL_MOVE (WARNING, RECONCILIATION)
+
+        ``OK_NO_OP``, ``SL_UPDATED_FROM_BROKER``, ``STALE_POSITION``,
+        ``SL_DRIFT_LARGE`` are suppressed — informational for the
+        local log only.
+        """
+        if self._alerter is None:
+            return
+        for event in outcome.report.events:
+            self._reconciliation_event_to_alert(event)
+
+    def _reconciliation_event_to_alert(
+        self, event: ReconciliationEvent,
+    ) -> None:
+        kind = event.kind
+        if kind is ReconciliationKind.POSITION_CLOSED:
+            self._send_alert(
+                category=AlertCategory.TRADE,
+                event_subtype="TRADE_CLOSED",
+                severity=AlertSeverity.INFO,
+                pair=event.pair,
+                full_text=event.message,
+                short_text=f"closed (deal_id={event.deal_id})",
+                debug=dict(event.debug, source="reconciliation"),
+            )
+            return
+        if kind is ReconciliationKind.BROKER_ORPHAN:
+            self._send_alert(
+                category=AlertCategory.RECONCILIATION,
+                event_subtype="BROKER_ORPHAN",
+                severity=AlertSeverity.WARNING,
+                pair=event.pair,
+                full_text=event.message,
+                short_text=f"orphan deal_id={event.deal_id}",
+                debug=dict(event.debug),
+            )
+            return
+        if kind is ReconciliationKind.MISSING_LOCAL_KEPT:
+            self._send_alert(
+                category=AlertCategory.RECONCILIATION,
+                event_subtype="MISSING_LOCAL_KEPT",
+                severity=AlertSeverity.WARNING,
+                pair=event.pair,
+                full_text=event.message,
+                short_text=f"missing deal_id={event.deal_id}",
+                debug=dict(event.debug),
+            )
+            return
+        if kind is ReconciliationKind.MANUAL_SL_MOVE:
+            self._send_alert(
+                category=AlertCategory.RECONCILIATION,
+                event_subtype="MANUAL_SL_MOVE",
+                severity=AlertSeverity.WARNING,
+                pair=event.pair,
+                full_text=event.message,
+                short_text=f"manual SL deal_id={event.deal_id}",
+                debug=dict(event.debug),
+            )
+            return
+        # Suppressed at the alerts boundary (each for a different
+        # reason — the prior comment lumped them as "INFO-suppressed"
+        # which was wrong: STALE_POSITION and SL_DRIFT_LARGE carry
+        # WARNING severity at the reconciler):
+        #   OK_NO_OP (INFO)        — true no-op, no alert needed.
+        #   SL_UPDATED_FROM_BROKER (INFO) — handled internally; the
+        #     reconciler has already adopted the broker SL via the
+        #     action-application sweep. The operator doesn't need a
+        #     per-tick "we synced" notification.
+        #   STALE_POSITION (WARNING) — informational. Long-open
+        #     positions are flagged in the local jsonl log; an alert
+        #     per pass would be noise (the same position re-flags on
+        #     every reconciliation cycle until closed).
+        #   SL_DRIFT_LARGE (WARNING) — handled internally. The
+        #     reconciler always adopts the broker value; the WARNING
+        #     surfaces in the jsonl log for post-mortem review but
+        #     doesn't translate to an alert because the bot has
+        #     already converged on broker truth.
+        #   AMEND_FAILED — emitted by the Executor at the call site
+        #     (with broker context); reconciliation never sets this
+        #     kind for v1 but the enum lists it for forward compat.
+        return
 
 
 __all__ = ["BotLoop"]

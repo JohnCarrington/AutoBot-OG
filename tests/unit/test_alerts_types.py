@@ -40,9 +40,12 @@ def test_category_enum_values() -> None:
 
 
 def test_event_subtypes_includes_locked_set() -> None:
-    # The full closed set from the Phase 9 plan.
+    # The full closed set from the Phase 9 plan, plus
+    # AMEND_PERSIST_FAILED added in commit 2b's H1 fix (Session-3
+    # review: broker accepted amend but local persist failed → CRITICAL
+    # alert so the operator can manually reconcile state divergence).
     expected = {
-        "TRADE_OPENED", "TRADE_CLOSED", "AMEND_FAILED",
+        "TRADE_OPENED", "TRADE_CLOSED", "AMEND_FAILED", "AMEND_PERSIST_FAILED",
         "BROKER_ORPHAN", "MISSING_LOCAL_KEPT", "MANUAL_SL_MOVE",
         "STARTUP", "SHUTDOWN", "FEED_STALE", "FEED_RESUMED",
         "FAILURE_THRESHOLD_TRIPPED",

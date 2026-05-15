@@ -23,12 +23,14 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import subprocess
 import sys
 from datetime import datetime, timezone
 from typing import Optional
 
 from dotenv import load_dotenv
 
+from alerts import Alert, AlertCategory, AlertSeverity, TelegramAlerter
 from config.pair_config import PAIRS
 from execution.executor import Executor
 from execution.position_manager import PositionManager
@@ -63,9 +65,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     """Run the bot until shutdown. Returns the process exit code."""
     load_dotenv()  # populate os.environ from .env before any constant read
     setup_logging(level=BOT_LOG_LEVEL, log_file=BOT_LOG_FILE or None)
-    logger.info(
-        "AutoBot-OG main() starting (env=%s)", os.getenv("IG_ACC_TYPE", "?"),
-    )
+    ig_env = (os.getenv("IG_ACC_TYPE") or "?").upper()
+    logger.info("AutoBot-OG main() starting (env=%s)", ig_env)
 
     config = _load_config()
 
@@ -78,11 +79,20 @@ def main(argv: Optional[list[str]] = None) -> int:
             logger.error("preflight failure: %s", msg)
         return 1
 
+    # --- Construct the alerter (single instance shared across runtime) --
+    # Done BEFORE _build_runtime so the same instance flows into Executor
+    # + BotLoop. No-op mode if creds missing — TelegramAlerter logs a
+    # WARNING once at construction and short-circuits send/tick/close.
+    alerter = TelegramAlerter()
+
     # --- Build the runtime tree -----------------------------------------
     try:
-        bot, subscriber = _build_runtime(config)
+        bot, subscriber = _build_runtime(config, alerter=alerter)
     except Exception:
         logger.exception("Failed to build runtime tree")
+        # No bot constructed → the alerter never reached BotLoop, so
+        # close it directly so any pending state drains.
+        alerter.close()
         return 1
 
     # --- Signal wiring (set before start() so a fast SIGINT works) ------
@@ -91,14 +101,18 @@ def main(argv: Optional[list[str]] = None) -> int:
             "Received signal %s — requesting graceful shutdown",
             signal.Signals(signum).name if signum in iter(signal.Signals) else signum,
         )
+        # External signal — no reason supplied, so no
+        # FAILURE_THRESHOLD_TRIPPED alert. The operator already knows
+        # they sent the signal.
         bot.request_shutdown()
 
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)
 
     # --- Hydrate + start_live --------------------------------------------
+    hydration_summary: Optional[dict] = None
     try:
-        bot.hydrate()
+        hydration_summary = bot.hydrate()
         bot.start()
     except Exception:
         logger.exception("Hydration / start failed")
@@ -119,9 +133,26 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
     bot.mark_ready()
 
+    # --- STARTUP alert (after mark_ready, before main-thread block) -----
+    _emit_startup_alert(
+        alerter=alerter,
+        ig_env=ig_env,
+        pairs=config.pairs,
+        hydration_summary=hydration_summary or {"cached_bars": 0, "rest_bars": 0},
+    )
+
     # --- Main thread: block on shutdown event ---------------------------
     logger.info("BotLoop running — awaiting shutdown signal")
     bot.shutdown_event().wait()
+
+    # --- SHUTDOWN alert BEFORE bot.stop() drains the alerter ------------
+    # Queueing the SHUTDOWN here means the bot.stop() path's
+    # alerter.close() drains it as part of the normal shutdown. INFO
+    # lands as the final "we're going down cleanly" line; CRITICAL
+    # bypasses coalescing so it ships immediately even if the
+    # close-drain is slow.
+    crashed = bot.crashed
+    _emit_shutdown_alert(alerter=alerter, crashed=crashed)
 
     # --- Graceful teardown ----------------------------------------------
     logger.info(
@@ -132,7 +163,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         inflight_timeout_sec=BOT_SHUTDOWN_INFLIGHT_TIMEOUT_SEC,
         poll_sec=BOT_SHUTDOWN_DRAIN_POLL_SEC,
     )
-    exit_code = 2 if bot.crashed else 0
+    exit_code = 2 if crashed else 0
     logger.info("AutoBot-OG main() exiting with code %d", exit_code)
     return exit_code
 
@@ -159,8 +190,19 @@ def _load_config() -> BotRuntimeConfig:
     )
 
 
-def _build_runtime(config: BotRuntimeConfig) -> tuple[BotLoop, LightstreamerSubscriber]:
-    """Wire all the Phase 1-7 components into a :class:`BotLoop`."""
+def _build_runtime(
+    config: BotRuntimeConfig,
+    *,
+    alerter: Optional[TelegramAlerter] = None,
+) -> tuple[BotLoop, LightstreamerSubscriber]:
+    """Wire all the Phase 1-7 components into a :class:`BotLoop`.
+
+    The optional ``alerter`` is shared across :class:`Executor` and
+    :class:`BotLoop` so every alert flows through the same coalescer
+    and Telegram client. Tests that don't care about alerts can omit
+    it; production wiring constructs one in :func:`main` and passes
+    it here.
+    """
     # IG session + client.
     session = create_ig_service()
     ig_client = IGClient(session=session)
@@ -193,6 +235,7 @@ def _build_runtime(config: BotRuntimeConfig) -> tuple[BotLoop, LightstreamerSubs
         position_manager=position_manager,
         client=ig_client,
         epic_resolver=_epic_resolver,
+        alerter=alerter,
     )
 
     # Feed manager — pulls the LS subscriber factory and the history
@@ -242,6 +285,7 @@ def _build_runtime(config: BotRuntimeConfig) -> tuple[BotLoop, LightstreamerSubs
         pair_to_epic=config.pair_to_epic,
         regime_engines=regime_engines,  # shared with RiskGuard (C2)
         clock=lambda: datetime.now(timezone.utc),
+        alerter=alerter,
     )
 
     # ``start_live`` creates the subscriber; until then ``captured`` is
@@ -276,6 +320,122 @@ def _extract_tokens(session) -> tuple[str, str]:
             f"(have: {sorted(norm.keys())})"
         )
     return cst, xst
+
+
+# ---------------------------------------------------------------------------
+# Alert payload builders
+# ---------------------------------------------------------------------------
+
+
+def _git_short_hash() -> str:
+    """Return ``git rev-parse --short HEAD`` or ``"unknown"`` on any error.
+
+    The bot may be deployed from a tarball (no ``.git`` dir) or run
+    in a container that doesn't ship git — both are valid v1
+    deployment shapes. Failing closed to ``"unknown"`` keeps the
+    STARTUP alert alive in those environments instead of crashing
+    the bot for the sake of an observability string.
+    """
+    return _git_command(["rev-parse", "--short", "HEAD"])
+
+
+def _git_branch_name() -> str:
+    """Return current branch (``--abbrev-ref HEAD``) or ``"unknown"``."""
+    return _git_command(["rev-parse", "--abbrev-ref", "HEAD"])
+
+
+def _git_command(args: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=2.0,
+        )
+    except Exception:
+        return "unknown"
+    out = (result.stdout or "").strip()
+    return out or "unknown"
+
+
+def _emit_startup_alert(
+    *,
+    alerter: TelegramAlerter,
+    ig_env: str,
+    pairs: tuple[str, ...],
+    hydration_summary: dict,
+) -> None:
+    """Construct and dispatch the STARTUP alert.
+
+    Format (as locked in the integration plan):
+
+        🤖 BOT STARTUP
+        Account: {DEMO|LIVE|?}
+        Pairs: {N} ({pair list})
+        Hydration: {cached_bars} cached, {rest_bars} REST
+        Build: {short_hash} ({branch})
+    """
+    cached = int(hydration_summary.get("cached_bars", 0))
+    rest = int(hydration_summary.get("rest_bars", 0))
+    pair_list = ", ".join(pairs) if pairs else "(none)"
+    full = (
+        f"\U0001f916 BOT STARTUP\n"
+        f"Account: {ig_env}\n"
+        f"Pairs: {len(pairs)} ({pair_list})\n"
+        f"Hydration: {cached} cached, {rest} REST\n"
+        f"Build: {_git_short_hash()} ({_git_branch_name()})"
+    )
+    short = f"started ({_git_short_hash()}, {ig_env})"
+    alerter.send(
+        Alert(
+            category=AlertCategory.SYSTEM,
+            event_subtype="STARTUP",
+            severity=AlertSeverity.INFO,
+            pair=None,
+            full_text=full,
+            short_text=short,
+            timestamp=datetime.now(timezone.utc),
+            debug={
+                "ig_env": ig_env,
+                "pairs": list(pairs),
+                "hydration": {"cached_bars": cached, "rest_bars": rest},
+            },
+        )
+    )
+
+
+def _emit_shutdown_alert(
+    *,
+    alerter: TelegramAlerter,
+    crashed: bool,
+) -> None:
+    """Construct and dispatch the SHUTDOWN alert.
+
+    Severity is INFO for clean shutdown, CRITICAL when the bot
+    crashed (failure-threshold trip). CRITICAL bypasses coalescing
+    so it ships immediately even if the close-drain is slow.
+    """
+    if crashed:
+        full = "\U0001f916 BOT SHUTDOWN (CRASHED) — failure threshold tripped"
+        short = "shutdown (crashed)"
+        severity = AlertSeverity.CRITICAL
+    else:
+        full = "\U0001f916 BOT SHUTDOWN — clean exit"
+        short = "shutdown (clean)"
+        severity = AlertSeverity.INFO
+    alerter.send(
+        Alert(
+            category=AlertCategory.SYSTEM,
+            event_subtype="SHUTDOWN",
+            severity=severity,
+            pair=None,
+            full_text=full,
+            short_text=short,
+            timestamp=datetime.now(timezone.utc),
+            debug={"crashed": crashed},
+        )
+    )
 
 
 if __name__ == "__main__":
