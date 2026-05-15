@@ -1,0 +1,271 @@
+"""Phase 8 entrypoint: ``main()`` wires .env → preflight → BotLoop.
+
+Exit codes:
+
+- ``0`` — graceful shutdown via SIGTERM/SIGINT
+- ``1`` — pre-flight failure (env vars, IG auth, subscriptions); the
+  bot never started trading
+- ``2`` — runtime crash (5-strike failure counter trip, or an
+  uncaught exception escaped the LS handler)
+
+The main thread is a single ``threading.Event.wait()`` — all the
+trading work happens on the LS reader thread inside the BotLoop event
+callback. Signals are delivered to the main thread by Python's signal
+machinery, so the handler can simply set the shutdown event and
+let ``main()`` proceed to the drain.
+
+There is **no** auto-restart loop; if the bot crashes, an external
+supervisor (systemd, docker, etc.) restarts the process. v1 keeps the
+process minimal so the supervisor decides recovery policy.
+"""
+from __future__ import annotations
+
+import logging
+import os
+import signal
+import sys
+from datetime import datetime, timezone
+from typing import Optional
+
+from dotenv import load_dotenv
+
+from config.pair_config import PAIRS
+from execution.executor import Executor
+from execution.position_manager import PositionManager
+from feed.feed_manager import FeedManager
+from feed.ig_rest.auth import create_ig_service
+from feed.ig_rest.client import IGClient
+from feed.ig_rest.history import fetch_historical_prices
+from feed.lightstreamer.client import LightstreamerSubscriber
+from regime.engine import RegimeEngine
+from risk.guard import RiskGuard
+
+from . import preflight as preflight_mod
+from .constants import (
+    BOT_LOG_FILE,
+    BOT_LOG_LEVEL,
+    BOT_SHUTDOWN_DRAIN_POLL_SEC,
+    BOT_SHUTDOWN_INFLIGHT_TIMEOUT_SEC,
+)
+from .logging_setup import setup_logging
+from .loop import BotLoop
+from .types import BotRuntimeConfig
+
+logger = logging.getLogger("bot.main")
+
+
+# ---------------------------------------------------------------------------
+# Public entrypoint
+# ---------------------------------------------------------------------------
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """Run the bot until shutdown. Returns the process exit code."""
+    load_dotenv()  # populate os.environ from .env before any constant read
+    setup_logging(level=BOT_LOG_LEVEL, log_file=BOT_LOG_FILE or None)
+    logger.info(
+        "AutoBot-OG main() starting (env=%s)", os.getenv("IG_ACC_TYPE", "?"),
+    )
+
+    config = _load_config()
+
+    # --- Static pre-flight (env, disk, IG auth) -------------------------
+    static_report = preflight_mod.run_static_checks()
+    for r in static_report.results:
+        logger.info("preflight[%s]: ok=%s msg=%s", r.name, r.ok, r.message)
+    if not static_report.ok:
+        for msg in static_report.fail_messages():
+            logger.error("preflight failure: %s", msg)
+        return 1
+
+    # --- Build the runtime tree -----------------------------------------
+    try:
+        bot, subscriber = _build_runtime(config)
+    except Exception:
+        logger.exception("Failed to build runtime tree")
+        return 1
+
+    # --- Signal wiring (set before start() so a fast SIGINT works) ------
+    def _signal_handler(signum: int, _frame) -> None:
+        logger.warning(
+            "Received signal %s — requesting graceful shutdown",
+            signal.Signals(signum).name if signum in iter(signal.Signals) else signum,
+        )
+        bot.request_shutdown()
+
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
+    # --- Hydrate + start_live --------------------------------------------
+    try:
+        bot.hydrate()
+        bot.start()
+    except Exception:
+        logger.exception("Hydration / start failed")
+        bot.stop(inflight_timeout_sec=BOT_SHUTDOWN_INFLIGHT_TIMEOUT_SEC)
+        return 1
+
+    # --- Subscription verification (post-start, async settling) ---------
+    sub_check = preflight_mod.verify_subscriptions(
+        subscriber=subscriber,
+        expected_pairs=config.pairs,
+    )
+    logger.info("preflight[%s]: ok=%s msg=%s", sub_check.name, sub_check.ok, sub_check.message)
+    if not sub_check.ok:
+        bot.stop(inflight_timeout_sec=BOT_SHUTDOWN_INFLIGHT_TIMEOUT_SEC)
+        return 1
+
+    # --- Main thread: block on shutdown event ---------------------------
+    logger.info("BotLoop running — awaiting shutdown signal")
+    bot.shutdown_event().wait()
+
+    # --- Graceful teardown ----------------------------------------------
+    logger.info(
+        "Beginning shutdown drain (timeout=%.1fs)",
+        BOT_SHUTDOWN_INFLIGHT_TIMEOUT_SEC,
+    )
+    bot.stop(
+        inflight_timeout_sec=BOT_SHUTDOWN_INFLIGHT_TIMEOUT_SEC,
+        poll_sec=BOT_SHUTDOWN_DRAIN_POLL_SEC,
+    )
+    exit_code = 2 if bot.crashed else 0
+    logger.info("AutoBot-OG main() exiting with code %d", exit_code)
+    return exit_code
+
+
+# ---------------------------------------------------------------------------
+# Internals
+# ---------------------------------------------------------------------------
+
+
+def _load_config() -> BotRuntimeConfig:
+    """Read top-level switches from .env / process env into a config dataclass."""
+    pairs_env = os.getenv("BOT_PAIRS")
+    pairs = (
+        tuple(p.strip().upper() for p in pairs_env.split(",") if p.strip())
+        if pairs_env
+        else PAIRS
+    )
+    pair_to_epic = {p: f"CS.D.{p}.TODAY.IP" for p in pairs}
+    return BotRuntimeConfig(
+        pairs=pairs,
+        pair_to_epic=pair_to_epic,
+        log_level=BOT_LOG_LEVEL,
+        log_file=BOT_LOG_FILE or None,
+    )
+
+
+def _build_runtime(config: BotRuntimeConfig) -> tuple[BotLoop, LightstreamerSubscriber]:
+    """Wire all the Phase 1-7 components into a :class:`BotLoop`."""
+    # IG session + client.
+    session = create_ig_service()
+    ig_client = IGClient(session=session)
+
+    # Persistent state.
+    position_manager = PositionManager.load_from_path()
+
+    # Risk guard — needs at least one regime engine. v1 design is
+    # per-pair regime; the BotLoop instantiates per-pair engines
+    # internally, so we hand RiskGuard the "first pair's" engine for
+    # the rule that consults regime state (TREND-overnight-hold). v1
+    # trades GBPUSD only, so this collapses cleanly.
+    primary_regime = RegimeEngine()
+    risk_guard = RiskGuard(engine=primary_regime)
+
+    # Executor.
+    def _epic_resolver(pair: str) -> str:
+        epic = config.pair_to_epic.get(pair)
+        if epic is None:
+            raise KeyError(f"No epic mapping for pair {pair!r}")
+        return epic
+
+    executor = Executor(
+        position_manager=position_manager,
+        client=ig_client,
+        epic_resolver=_epic_resolver,
+    )
+
+    # Feed manager — pulls the LS subscriber factory and the history
+    # fetcher closures from the IG session.
+    cst, xst = _extract_tokens(session)
+    account_id = session.account_id or getattr(session.service, "ACC_NUMBER", None)
+    if not account_id:
+        raise RuntimeError("No IG account_id available for LS subscription")
+
+    def _history_fetcher(epic: str, resolution: str, num_points: int) -> dict:
+        return fetch_historical_prices(
+            session, epic=epic, resolution=resolution, num_points=num_points,
+        )
+
+    # FeedManager doesn't expose the underlying LS subscriber, but we
+    # need it for the post-start subscription check. The capturing
+    # factory grabs the instance on the way through.
+    captured: list[LightstreamerSubscriber] = []
+
+    def _subscriber_factory(on_update, on_status) -> LightstreamerSubscriber:
+        sub = LightstreamerSubscriber(
+            acc_type=session.acc_type,
+            account_id=account_id,
+            cst=cst,
+            xst=xst,
+            on_update=on_update,
+            on_status=on_status,
+        )
+        captured.append(sub)
+        return sub
+
+    from feed.feed_manager import PairSetup  # local import: avoid top noise
+
+    feed_manager = FeedManager.from_pairs(
+        [PairSetup(pair=p, epic=config.pair_to_epic[p]) for p in config.pairs],
+        history_fetcher=_history_fetcher,
+        subscriber_factory=_subscriber_factory,
+    )
+
+    bot = BotLoop(
+        feed_manager=feed_manager,
+        ig_client=ig_client,
+        executor=executor,
+        risk_guard=risk_guard,
+        position_manager=position_manager,
+        pairs=config.pairs,
+        pair_to_epic=config.pair_to_epic,
+        clock=lambda: datetime.now(timezone.utc),
+    )
+
+    # ``start_live`` creates the subscriber; until then ``captured`` is
+    # empty. Return a thunk-shaped accessor: the caller (main loop)
+    # reads it *after* bot.start() returns.
+    class _LateSubscriber:
+        @property
+        def subscribed_pairs(self) -> tuple[str, ...]:
+            return captured[0].subscribed_pairs if captured else ()
+
+    return bot, _LateSubscriber()  # type: ignore[return-value]
+
+
+def _extract_tokens(session) -> tuple[str, str]:
+    """Pull CST + X-SECURITY-TOKEN out of an IGSession's underlying service."""
+    sess = getattr(session.service, "session", None)
+    headers = getattr(sess, "headers", None) if sess is not None else None
+    if not headers:
+        raise RuntimeError(
+            "IG service has no session headers — create_session() did not "
+            "populate the token surface."
+        )
+    norm = {str(k).upper(): v for k, v in headers.items()}
+    cst = norm.get("CST")
+    xst = norm.get("X-SECURITY-TOKEN")
+    if not cst or not xst:
+        raise RuntimeError(
+            "CST / X-SECURITY-TOKEN missing from IG session headers "
+            f"(have: {sorted(norm.keys())})"
+        )
+    return cst, xst
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
+__all__ = ["main"]
