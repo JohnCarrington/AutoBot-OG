@@ -1,0 +1,34 @@
+[Unit]
+Description=AutoBot-OG trading bot
+Documentation=https://github.com/JohnCarrington/AutoBot-OG
+# Wait for the network so the LS subscriber and IG REST calls don't
+# fail-fast at boot. network-online.target is the standard "we have a
+# routable address" target on Ubuntu/systemd.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autobot
+Group=autobot
+WorkingDirectory=/opt/autobot-og
+EnvironmentFile=/opt/autobot-og/.env
+ExecStart=/opt/autobot-og/.venv/bin/python -m bot.main
+# Restart=no is a deliberate v1 decision — automatic restart would
+# mask the FAILURE_THRESHOLD_TRIPPED CRITICAL Telegram alert. The
+# operator inspects the alert + journalctl and decides whether to
+# restart manually. See deploy/RUNBOOK.md section 5.
+Restart=no
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=autobot-og
+# 60s start timeout: hydration (REST history fetch + cache parse) is
+# the slowest startup step and typically completes in 10-20s; 60s
+# leaves headroom for network jitter without false-firing.
+TimeoutStartSec=60
+# 30s stop timeout matches BOT_SHUTDOWN_INFLIGHT_TIMEOUT_SEC's worst
+# case + a few seconds for alerter.close() to drain pending alerts.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,32 @@
+[Unit]
+Description=AutoBot-OG pre-market healthcheck
+Documentation=https://github.com/JohnCarrington/AutoBot-OG
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=autobot
+Group=autobot
+WorkingDirectory=/opt/autobot-og
+EnvironmentFile=/opt/autobot-og/.env
+ExecStart=/opt/autobot-og/.venv/bin/python -m bot.healthcheck
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=autobot-og-healthcheck
+# 120s upper bound: IG auth + LS-endpoint TCP-connect + journalctl
+# scan + four cheap local checks. journalctl alone caps at 10s
+# (HEALTHCHECK_JOURNALCTL_TIMEOUT_SEC); IG auth is the variable.
+TimeoutStartSec=120
+# H2 (Phase 10 review): the healthcheck's exit-code semantic is
+# 0 = all checks pass, 2 = warn (first-run state files absent — no
+# Telegram alert, just operator awareness), 1 = hard failure (CRITICAL
+# alert dispatched). systemd's default treats every non-zero exit as
+# failed; whitelisting 2 keeps `systemctl is-failed` returning success
+# on the warn path so monitoring tooling (OnFailure= cascades, uptime
+# probes) doesn't false-fire on every weekday warn run.
+SuccessExitStatus=0 2
+
+# No OnFailure= here — the healthcheck script itself dispatches a
+# CRITICAL HEALTHCHECK_FAILED Telegram alert before exit 1. A
+# separate failure-alert unit would duplicate.

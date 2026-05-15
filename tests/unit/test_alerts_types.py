@@ -40,15 +40,22 @@ def test_category_enum_values() -> None:
 
 
 def test_event_subtypes_includes_locked_set() -> None:
-    # The full closed set from the Phase 9 plan, plus
-    # AMEND_PERSIST_FAILED added in commit 2b's H1 fix (Session-3
-    # review: broker accepted amend but local persist failed → CRITICAL
-    # alert so the operator can manually reconcile state divergence).
+    # The full closed set from the Phase 9 plan, plus:
+    # - AMEND_PERSIST_FAILED added in commit 2b's H1 fix (Session-3
+    #   review: broker accepted amend but local persist failed →
+    #   CRITICAL alert so operator can reconcile state divergence).
+    # - SHADOW_TRADE added in Phase 10 (would-be trade caught by
+    #   SHADOW_MODE intercept in BotLoop._evaluate_and_execute).
+    # - HEALTHCHECK_FAILED added in Phase 10 (pre-market healthcheck
+    #   reported one or more hard failures).
     expected = {
         "TRADE_OPENED", "TRADE_CLOSED", "AMEND_FAILED", "AMEND_PERSIST_FAILED",
+        "SHADOW_TRADE",
         "BROKER_ORPHAN", "MISSING_LOCAL_KEPT", "MANUAL_SL_MOVE",
         "STARTUP", "SHUTDOWN", "FEED_STALE", "FEED_RESUMED",
-        "FAILURE_THRESHOLD_TRIPPED",
+        "FAILURE_THRESHOLD_TRIPPED", "HEALTHCHECK_FAILED",
+        # Phase 10 H1 layer 1 + 2 (Session-3 review):
+        "STARTUP_ABORTED", "SHADOW_GUARD_BLOCKED",
     }
     assert set(EVENT_SUBTYPES) == expected
 

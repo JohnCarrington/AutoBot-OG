@@ -180,6 +180,7 @@ class BotLoop:
         clock: Optional[Callable[[], datetime]] = None,
         regime_engines: Optional[dict[str, RegimeEngine]] = None,
         alerter: Optional[TelegramAlerter] = None,
+        shadow_mode: bool = False,
     ) -> None:
         self._feed = feed_manager
         self._client = ig_client
@@ -192,6 +193,18 @@ class BotLoop:
         self._account_currency = account_currency
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._alerter = alerter
+        # Phase 10: SHADOW_MODE replaces the broker call in
+        # _evaluate_and_execute with a SHADOW_TRADE alert + log.
+        # Reconciliation, force-close, SL evaluation, and the alert
+        # pipeline (other than SHADOW_TRADE) all behave identically;
+        # only the open-position broker call is intercepted.
+        self._shadow_mode = bool(shadow_mode)
+        if self._shadow_mode:
+            logger.warning(
+                "BotLoop running in SHADOW_MODE — no trades will be opened "
+                "at the broker. SHADOW_TRADE alerts will fire in place of "
+                "TRADE_OPENED."
+            )
         # In-memory deal log: deal_id -> {pair, reason, closed_at_utc}.
         # Populated by _execute_force_close on broker-accepted closes so
         # the next reconciliation pass classifies the now-missing local
@@ -859,6 +872,20 @@ class BotLoop:
                 order.position_id,
             )
             return
+        # H1 layer 2 (Phase 10 review): defense in depth. Layer 1
+        # in bot.main refuses to start when shadow_mode is true and
+        # positions exist; reaching here with shadow_mode implies
+        # layer 1 was bypassed. Skip the broker close + the
+        # TRADE_CLOSED alert + the deal-log entry; emit
+        # SHADOW_GUARD_BLOCKED instead so the operator sees the
+        # gate fire.
+        if self._shadow_mode:
+            self._emit_shadow_guard_blocked(
+                operation="force_close",
+                deal_id=position.deal_id,
+                pair=position.pair,
+            )
+            return
         # C1 (adversarial review 2026-05-15): CloseRequest.position_direction
         # holds the position's OWN direction. The wrapper in
         # feed.ig_rest.positions.close_position inverts internally before
@@ -995,6 +1022,15 @@ class BotLoop:
                 signal.pair, decision.rule, decision.reason,
             )
             return
+        # Phase 10: SHADOW_MODE intercept. After risk gating (so risk
+        # decisions are faithfully exercised in shadow runs) and BEFORE
+        # the broker call. NO _with_inflight_tracked wrap because there
+        # is no broker round-trip — the inflight counter only protects
+        # genuine network IO, and incrementing it for a no-op would
+        # gratuitously hold up shutdown drain.
+        if self._shadow_mode:
+            self._emit_shadow_trade(signal=signal, decision=decision)
+            return
         # Approved — open the position. Tracked via in-flight counter.
         try:
             self._with_inflight_tracked(
@@ -1027,6 +1063,20 @@ class BotLoop:
                 )
                 continue
             if amend is None:
+                continue
+            # H1 layer 2 (Phase 10 review): defense in depth. Layer 1
+            # in bot.main refuses to start when shadow_mode is true
+            # and positions exist, so reaching here with shadow_mode
+            # implies layer 1 was bypassed (programming bug, direct
+            # BotLoop construction in tests, race during shutdown).
+            # Skip the broker call and emit a WARNING alert + log so
+            # the operator knows the gate engaged.
+            if self._shadow_mode:
+                self._emit_shadow_guard_blocked(
+                    operation="apply_amend",
+                    deal_id=position.deal_id,
+                    pair=position.pair,
+                )
                 continue
             try:
                 self._with_inflight_tracked(
@@ -1148,6 +1198,17 @@ class BotLoop:
         with self._inflight_lock:
             return self._inflight_count
 
+    def position_manager_for_startup_check(self) -> PositionManager:
+        """Return the wired PositionManager for bot.main's H1 layer-1
+        check (shadow_mode + non-empty positions = refuse to start).
+
+        Exposed via a dedicated method (rather than a generic property)
+        so the call site in bot.main is greppable and the intent is
+        documented at both ends. The method name is deliberately verbose
+        — this is not a general-purpose getter.
+        """
+        return self._positions
+
     # ------------------------------------------------------------------
     # Alerter helpers
     # ------------------------------------------------------------------
@@ -1207,6 +1268,104 @@ class BotLoop:
             logger.exception(
                 "alerter.send raised (subtype=%s pair=%s)", event_subtype, pair,
             )
+
+    def _emit_shadow_trade(self, *, signal: Signal, decision: Any) -> None:
+        """Phase 10: emit a SHADOW_TRADE alert in place of a real open.
+
+        Severity INFO, category TRADE, ghost-emoji prefix. The body
+        mirrors what TRADE_OPENED would have shown — pair, direction,
+        planned entry, suggested SL/TP, strategy, regime — so the
+        operator can compare side-by-side with a real-trade
+        expectation. ``[mode=shadow]`` marker in body and debug
+        payload prevents confusion with real fills if logs and
+        Telegram history are reviewed together.
+
+        Always logs at INFO regardless of alerter wiring so a
+        no-alerter shadow run still leaves a journalctl breadcrumb.
+        """
+        from regime.labels import Direction
+        side = "BUY" if signal.direction == Direction.BULLISH else "SELL"
+        full_text = (
+            f"\U0001f47b [SHADOW] {signal.pair} {side} @ "
+            f"{signal.suggested_entry_price:.5f} "
+            f"SL={signal.suggested_sl_price:.5f} "
+            f"strategy={signal.strategy_name} "
+            f"regime={signal.regime} [mode=shadow]"
+        )
+        short_text = (
+            f"[SHADOW] {side} @ {signal.suggested_entry_price:.5f}"
+        )
+        logger.info(
+            "SHADOW_TRADE would-open: pair=%s side=%s entry=%.5f sl=%.5f "
+            "strategy=%s regime=%s rule=%s",
+            signal.pair, side,
+            signal.suggested_entry_price, signal.suggested_sl_price,
+            signal.strategy_name, signal.regime,
+            getattr(decision, "rule", "ok"),
+        )
+        self._send_alert(
+            category=AlertCategory.TRADE,
+            event_subtype="SHADOW_TRADE",
+            severity=AlertSeverity.INFO,
+            pair=signal.pair,
+            full_text=full_text,
+            short_text=short_text,
+            debug={
+                "mode": "shadow",
+                "pair": signal.pair,
+                "direction": side,
+                "planned_entry": signal.suggested_entry_price,
+                "suggested_sl": signal.suggested_sl_price,
+                "suggested_tp": signal.suggested_tp_price,
+                "strategy": signal.strategy_name,
+                "regime": str(signal.regime),
+                "risk_rule": getattr(decision, "rule", "ok"),
+            },
+        )
+
+    def _emit_shadow_guard_blocked(
+        self, *, operation: str, deal_id: str, pair: Optional[str],
+    ) -> None:
+        """H1 layer 2 (Phase 10 review): defense-in-depth alert when
+        shadow_mode is true but the bot is about to make a real
+        position-management broker call.
+
+        Layer 1 in :func:`bot.main.main` refuses to start in this
+        configuration (shadow_mode + non-empty positions). Reaching
+        this method means layer 1 was bypassed — typically because a
+        test constructs a BotLoop directly without going through
+        ``bot.main``, or a future refactor introduces a different
+        startup path. The gate exits the broker call, logs WARNING,
+        and emits a WARNING alert so the deviation is visible in
+        Telegram + journalctl.
+        """
+        logger.warning(
+            "SHADOW_GUARD_BLOCKED: skipped %s for deal_id=%s pair=%s "
+            "(shadow_mode=true; layer-1 startup guard should have "
+            "prevented reaching here — investigate)",
+            operation, deal_id, pair,
+        )
+        self._send_alert(
+            category=AlertCategory.SYSTEM,
+            event_subtype="SHADOW_GUARD_BLOCKED",
+            severity=AlertSeverity.WARNING,
+            pair=pair,
+            full_text=(
+                f"\U0001f6e1️ SHADOW_GUARD_BLOCKED — skipped "
+                f"{operation} for {pair} deal={deal_id}. shadow_mode "
+                f"is true; layer-1 startup guard should have refused "
+                f"this configuration. Investigate how the bot reached "
+                f"this state."
+            ),
+            short_text=(
+                f"shadow guard: skipped {operation} deal={deal_id}"
+            ),
+            debug={
+                "operation": operation,
+                "deal_id": deal_id,
+                "pair": pair,
+            },
+        )
 
     def _tick_alerter(self) -> None:
         """Tick the coalescer if wired. No-op + log on failure."""
