@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from regime.engine import RegimeEngine
 
@@ -58,26 +58,45 @@ class RiskGuard:
 
     def __init__(
         self,
-        engine: RegimeEngine,
+        engine: Optional[RegimeEngine] = None,
         state: Optional[CircuitBreakerState] = None,
         *,
         state_path: Path | str | None = None,
+        engine_for_pair: Optional[Callable[[str], RegimeEngine]] = None,
     ) -> None:
         """Construct the guard.
 
         Parameters
         ----------
-        engine : RegimeEngine
-            The pair's regime engine. Used by circuit_breakers for
-            emission queries and the live-at-last-H1 check.
+        engine : RegimeEngine, optional
+            Single regime engine for backward compatibility with
+            single-pair (v1 GBPUSD) callers. Required when
+            ``engine_for_pair`` is not supplied. Phase 4 tests use this
+            form.
         state : CircuitBreakerState, optional
             Pre-loaded state object. Useful in tests. If omitted, state
             is loaded from ``state_path`` (or :data:`DEFAULT_STATE_PATH`).
         state_path : Path or str, optional
             Where to load/persist circuit-breaker state. Ignored if
             ``state`` is provided.
+        engine_for_pair : Callable[[str], RegimeEngine], optional
+            Multi-pair routing seam (C2 fix, adversarial review
+            2026-05-15). When supplied, every method that consults
+            regime state resolves the pair's engine via this callable;
+            ``engine`` is then unused. Phase 8's BotLoop owns the
+            per-pair engine map and hands ``lambda p: engines[p]`` here
+            so RiskGuard reads the SAME object the BotLoop feeds with
+            H1/M5 closes. The old code path (`engine` only) created a
+            standalone engine that nothing fed, silently disabling the
+            regime-instability circuit breaker.
         """
-        self.engine = engine
+        if engine is None and engine_for_pair is None:
+            raise ValueError(
+                "RiskGuard requires either 'engine' (single-pair) or "
+                "'engine_for_pair' (multi-pair routing)."
+            )
+        self._engine = engine
+        self._engine_for_pair = engine_for_pair
         if state is not None:
             self.state = state
         else:
@@ -87,6 +106,42 @@ class RiskGuard:
                 else DEFAULT_STATE_PATH
             )
             self.state = CircuitBreakerState.load(path)
+
+    # --- Engine resolution ---------------------------------------------------
+
+    def _resolve_engine(self, pair: str) -> RegimeEngine:
+        """Return the regime engine for ``pair``.
+
+        Prefers ``engine_for_pair`` (multi-pair routing); falls back to
+        the single ``engine`` constructor argument when no callable was
+        supplied. Raises if neither is reachable for the pair.
+        """
+        if self._engine_for_pair is not None:
+            eng = self._engine_for_pair(pair)
+            if eng is None:
+                raise RuntimeError(
+                    f"engine_for_pair returned None for {pair!r}"
+                )
+            return eng
+        assert self._engine is not None, "RiskGuard has no engine wired"
+        return self._engine
+
+    @property
+    def engine(self) -> RegimeEngine:
+        """Backward-compatible accessor.
+
+        Returns the constructor's ``engine`` argument when the legacy
+        single-pair form was used. When the multi-pair callable form
+        was used, raises — callers must use :py:meth:`_resolve_engine`
+        with a pair (or read engine state per-pair via that path).
+        """
+        if self._engine is None:
+            raise RuntimeError(
+                "RiskGuard was constructed with engine_for_pair only; "
+                "use _resolve_engine(pair) or call allow_entry() to "
+                "route per pair."
+            )
+        return self._engine
 
     # --- Entry gate ----------------------------------------------------------
 
@@ -118,12 +173,13 @@ class RiskGuard:
             "candidate_direction": candidate.intended_direction.value,
         }
 
-        # 1. circuit_breakers
-        recent_emissions = self.engine.get_recent_emissions(
+        # 1. circuit_breakers — route to the pair's engine (C2 fix).
+        engine = self._resolve_engine(candidate.pair)
+        recent_emissions = engine.get_recent_emissions(
             window_minutes=REGIME_INSTABILITY_WINDOW_MIN,
             now_utc=now_utc,
         )
-        live_at_last = self.engine.regime_live_at_last_h1_close()
+        live_at_last = engine.regime_live_at_last_h1_close()
         cb_result = check_circuit_breakers(
             candidate=candidate,
             positions=positions,
@@ -190,15 +246,35 @@ class RiskGuard:
         force-close TREND positions when a transition to RANGE /
         VOLATILE / opposite-direction TREND is already in flight
         (H3 from the 2026-05-14 review).
+
+        Multi-pair routing (C2 fix, 2026-05-15): each position is
+        evaluated against ITS pair's regime engine — a BULLISH GBPUSD
+        TREND and a BEARISH USDJPY TREND don't share regime state, so
+        grouping by pair and calling ``apply_eod_force_close`` once
+        per group is correct. When the legacy single-engine
+        constructor form is used, every pair resolves to the same
+        engine and the loop collapses to one call.
         """
-        return apply_eod_force_close(
-            positions=positions,
-            now_utc=now_utc,
-            current_regime=self.engine.current_regime,
-            current_direction=self.engine.current_direction,
-            pending_regime=self.engine.pending_regime,
-            pending_direction=self.engine.pending_direction,
-        )
+        if not positions:
+            return []
+        # Group positions by pair to keep the call count down. The EOD
+        # rule itself is per-position; only the regime snapshot inputs
+        # differ per pair.
+        by_pair: dict[str, list[OpenPosition]] = {}
+        for p in positions:
+            by_pair.setdefault(p.pair, []).append(p)
+        out: list[ForceCloseOrder] = []
+        for pair, pair_positions in by_pair.items():
+            engine = self._resolve_engine(pair)
+            out.extend(apply_eod_force_close(
+                positions=pair_positions,
+                now_utc=now_utc,
+                current_regime=engine.current_regime,
+                current_direction=engine.current_direction,
+                pending_regime=engine.pending_regime,
+                pending_direction=engine.pending_direction,
+            ))
+        return out
 
     # --- Trade-outcome bookkeeping ------------------------------------------
 
