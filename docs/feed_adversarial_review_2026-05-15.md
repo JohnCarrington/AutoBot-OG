@@ -685,3 +685,310 @@ The architectural shape of the layer is sound: the cache-first
 decision tree, the manager/parser split, the `FeedEvent` envelope,
 the `RollingBuffer`/`CandleArchive` separation. Once the wire-format
 and UTM questions are settled, this is a thin patch.
+
+---
+
+# Addendum — re-review pass on `feature/feed` @ `ca8ab21`
+
+- **Branch reviewed:** `feature/feed` @ `ca8ab21`
+- **Base:** `develop`
+- **Date:** 2026-05-15
+- **Reviewer:** AutoBot-OG (read-only verification pass)
+- **Test status:** `654 passed in 3.19s` — full suite green, matches the
+  committed claim. Feed-only subset is `81 passed in 1.31s` (was 72;
+  9 new tests for C2/H1/H2/H3/H4).
+
+## Disposition of original findings
+
+| ID | Status | Note |
+|----|--------|------|
+| **C1** UTM ≠ open-time | **INVALID** | Disproved by `scripts/probe_lightstreamer_multitick_output_2026-05-15.json` — 92 updates over ~3 min with UTM = `1778847900000` constant (= 2026-05-15 12:25:00 UTC, the 12:25-12:30 bar's open). `unique_utm_values: 1, consecutive_utm_differs_count: 0`. The original concern was correctly raised given a single-sample probe, but multi-tick evidence resolves it. No code change required; comment in `parsers.py` could note "UTM is bar-anchored open time; verified by `probe_lightstreamer_multitick_output_*.json`" but that's a polish item, not a blocker. |
+| **C2** Price scaling | **FIXED (TESTS + DOCSTRINGS)** | The parser was always correct; the bug was confined to test fixtures and the headline-misleading docstring. Verified below. |
+| **H1** Hydration drops cache on REST failure | **FIXED** | Verified below. |
+| **H2** Single GAP_FILLED hides intermediate BAR_CLOSEs | **FIXED** | Verified below. |
+| **H3** `snapshotTime` timezone | **FIXED** | Verified below; minor DST-fold caveat documented. |
+| **H4** Silent out-of-order drops | **FIXED** | Verified below. |
+| M1–M8, L1–L5 | **Unchanged** | Out of scope for this pass, per task remit. |
+
+## Verifications
+
+### C2 — verbatim probe fixture, no scaling elsewhere
+
+- `tests/unit/test_feed_lightstreamer_parsers.py:35-48` — `PROBE_PAYLOAD`
+  now contains the raw probe values (`"BID_OPEN": "13339.2"`, …). The
+  module docstring (lines 1-10) explicitly calls out the prior
+  scaled-decimal version as the hidden bug.
+- `tests/unit/test_feed_lightstreamer_parsers.py:72-95` — new
+  `test_parse_verbatim_probe_json_from_disk` opens
+  `scripts/probe_lightstreamer_output_2026-05-15.json`, pulls the
+  `CHART:5MINUTE` `sample_payload`, parses it, and asserts the candle's
+  open/close fall in `1000 < x < 100000` (the raw-points range). This is
+  exactly the "single verbatim-probe ingestion test" called for in the
+  original review, so a future fixture drift back to decimal scaling
+  will fail loudly.
+- `src/feed/lightstreamer/parsers.py:72-83` adds a multi-paragraph
+  docstring block explaining the raw-points convention and pointing at
+  the probe + the production AutoBotV1 rolling-CSV format. Inline
+  comments at lines 120-124 reinforce "no decimal scaling" at the only
+  place a reader might be tempted to add one.
+- Cross-check: `grep -rn "1\\.33392\\|/ *10000\\|\\* *10000\\|scale.*[Pp]rice" src/feed/` —
+  no results. No scaling sneaked in elsewhere.
+- `test_parse_full_payload_yields_mid_ohlc` keeps a sanity guard
+  (`assert 1000 < candle.open < 100000`) — a regression to decimal
+  scaling would also break this.
+
+C2 is properly fixed and double-protected by two independent tests.
+
+### H1 — `cache_only_degraded` mode
+
+- `src/feed/constants.py:83` declares `FEED_MIN_USABLE_BARS = _i("FEED_MIN_USABLE_BARS", 50)`.
+- `src/feed/hydration.py:417-440` walks the three branches:
+  - REST fails + `len(cached) >= 50` → `mode = "cache_only_degraded"`,
+    `rest_bars = []`, `degraded_error = "REST top-up failed: …"`, then
+    falls through to the merge block at line 461 which calls
+    `buffer.bulk_append(combined)` (combined = cached only). The
+    returned report has `cached_bars > 0`, `rest_bars = 0`,
+    `final_buffer_size = len(buffer)`, `error = degraded_error`.
+  - REST fails + `len(cached) < 50` → returns early with `mode = "failed"`,
+    `final_buffer_size = 0`, `error = …`. Buffer is intentionally not
+    populated; the strategy layer must refuse to trade.
+- `HydrationReport.ok` (lines 136-138) is `all(p.mode != "failed")`. So
+  `cache_only_degraded` counts as OK for trading purposes, matching the
+  H1 spec. `degraded_pairs` property (lines 144-149) exposes the
+  ops-visibility list.
+- Tests:
+  - `test_hydrate_rest_failure_with_short_cache_returns_failed` (30 bars,
+    REST raises) → asserts `mode == "failed"`, `len(buf) == 0`.
+  - `test_hydrate_rest_failure_with_usable_cache_degrades` (80 bars,
+    REST raises) → asserts `mode == "cache_only_degraded"`,
+    `cached_bars == 80`, `rest_bars == 0`, `len(buf) == 80`,
+    `error` contains the REST exception.
+- Walk-through of the threshold semantics:
+  - 30 bars → fails (under threshold).
+  - 50 bars → degrades (`>=` is inclusive).
+  - 75 bars → degrades (above threshold).
+  - 100 bars + REST fails → degrades (still tops out at cache because we
+    only consider top-up after the cache passed the freshness check,
+    which it didn't here).
+
+Subtle gap: the **boundary** at exactly 50 bars is not tested
+explicitly. The code uses `>=`, so 50 should degrade and 49 should
+fail; the test pair (30, 80) does not pin the boundary. This is a LOW
+test-quality gap, not a correctness gap.
+
+### H2 — per-bar BAR_CLOSE on gap-fill, plus summary
+
+- `src/feed/feed_manager.py:497-526` after `bulk_append` and
+  `archive.append_many`, the loop dispatches one `BAR_CLOSE` per bar in
+  `missing` (debug `reason="gap_fill_backfill"`), then a single
+  `GAP_FILLED` summary (debug carries `bars_filled`, `first_close`,
+  `last_close`).
+- Test `test_gap_fill_emits_bar_close_per_backfilled_bar` seeds a
+  20-min-old bar, drops/reconnects, returns 3 REST bars, and asserts
+  exactly 3 `BAR_CLOSE` events with `reason == "gap_fill_backfill"`
+  plus 1 `GAP_FILLED`. Asserts time order on the per-bar closes.
+
+Walk-through against the question "could strategies double-process":
+
+1. `_gap_fill_on_resume` sets `state.last_emitted_close = missing[-1].close_time`
+   and `state.last_emitted_was_closed = True` **before** dispatching the
+   per-bar events.
+2. The next live LS payload then enters `_on_ls_update`:
+   - If its `close_time > missing[-1].close_time` → Path 1 (boundary
+     crossing). `prev_was_closed` is `True`, so the inner "close the
+     prior bar" branch is skipped — no extra `BAR_CLOSE` for
+     `missing[-1]`. Push the new bar, emit a fresh `BAR_UPDATE`. ✓
+   - If `close_time == missing[-1].close_time` → Path 2 (in-progress
+     update for the same bar). Push replaces the REST-sourced
+     `missing[-1]` with the LS-sourced candle, emit `BAR_UPDATE`. The
+     `cons_end and not prev_was_closed` guard prevents a redundant
+     `BAR_CLOSE` (we already set `was_closed=True`). ✓
+   - If `close_time < missing[-1].close_time` → Path 3 (out-of-order),
+     dropped per H4. ✓
+
+So no double-process. The trade-off the design has accepted is that a
+strategy listening on `BAR_CLOSE` will receive REST-sourced bars
+during gap-fill — their `source == "REST"` and the event `debug` has
+`reason == "gap_fill_backfill"`, so strategies can filter if they want
+LS-only logic.
+
+One latent issue worth a comment (not flagging as a new finding):
+during the per-bar `BAR_CLOSE` dispatch loop, `latest_candle(pair)`
+returns `missing[-1]` for every iteration — not the bar being
+dispatched. If a strategy callback calls back into `latest_candle`
+during a per-bar BAR_CLOSE handler, it will see the wrong bar. The
+documented contract is "consume `event.candle`, not `latest_candle()`
+inside the handler", but it's worth a docstring note in `feed_manager.py`.
+
+### H3 — Europe/London tz handling
+
+- `src/feed/hydration.py:85` `_LONDON = ZoneInfo("Europe/London")`.
+- `_parse_history_entry` (lines 219-237) prefers `snapshotTimeUTC` with
+  `is_utc=True`; falls back to `snapshotTime` with `is_utc=False`.
+- `_coerce_to_utc` (lines 310-320) honours explicit tzinfo first, then
+  branches on `is_utc`.
+- Tests:
+  - `test_parse_history_v2_utc_passthrough` — `snapshotTimeUTC =
+    "2026-05-15T13:00:00"` → close 13:05 UTC.
+  - `test_parse_history_v1_bst_shifts_minus_one_hour` — `snapshotTime =
+    "2026/06/15 13:00:00"` (BST) → close 12:05 UTC (13:00 London − 1h).
+  - `test_parse_history_v1_gmt_no_shift` — `snapshotTime =
+    "2026/01/15 13:00:00"` (GMT) → close 13:05 UTC.
+  - `test_parse_history_explicit_offset_overrides_flag` —
+    `snapshotTimeUTC = "2026-05-15T08:00:00-05:00"` → close 13:05 UTC.
+    This catches the "what if IG sends an explicit offset even on a
+    UTC-flagged field" case; the `if dt.tzinfo is not None: return
+    dt.astimezone(timezone.utc)` branch in `_coerce_to_utc` is what's
+    being exercised.
+
+**DST edge cases — not tested, behaviour verified empirically:**
+
+```text
+spring-forward gap 01:30 BST (2026-03-29)  → 01:30 UTC  (treats as GMT, pre-shift)
+fall-back ambiguous 01:30 BST/GMT (2026-10-25, fold=0 default)
+                                            → 00:30 UTC  (first occurrence = BST)
+fall-back ambiguous 01:30 fold=1            → 01:30 UTC  (second occurrence = GMT)
+summer 13:00 BST (2026-06-15)               → 12:00 UTC  ✓
+winter 13:00 GMT (2026-01-15)               → 13:00 UTC  ✓
+```
+
+The spring-forward gap can only matter if IG were to publish a bar
+whose `snapshotTime` falls in the (non-existent) 01:00-02:00 BST gap —
+which it can't because clocks jump. The fall-back ambiguity could in
+principle mis-attribute one hour of bars per year to BST instead of
+GMT (1h drift) if IG returns naive timestamps in that hour. In
+practice, FX markets are closed during the weekend DST transitions
+in the UK (transitions happen on a Sunday morning), so the affected
+window is empty. **Recommend adding a `# DST caveat:` docstring note
+to `_coerce_to_utc`** so a future maintainer doesn't get surprised.
+Not severe enough to block merge.
+
+### H4 — out-of-order observability
+
+- `_PairState.out_of_order_count: int = 0` (line 132). Docstring
+  explicitly cites H4.
+- `FeedManager._on_ls_update` Path 3 (lines 423-437):
+  `state.out_of_order_count += 1`, then `logger.warning(...)` with the
+  count in the message.
+- `FeedManager.out_of_order_counts()` (lines 310-321) returns
+  `{pair: state.out_of_order_count}` for every configured pair.
+- Tests:
+  - `test_out_of_order_payload_logs_warning_and_bumps_counter` — pushes
+    a baseline bar at offset=+5, then a stale bar at offset=0, asserts
+    `out_of_order_counts() == {"GBPUSD": 1}`, asserts the WARNING log
+    fired, and confirms no BAR_UPDATE/BAR_CLOSE for the stale candle.
+  - `test_out_of_order_counts_starts_zero_for_each_pair` — multi-pair
+    init shows `{"GBPUSD": 0, "EURUSD": 0}`.
+
+Walk-through against the question "could a same-timestamp update get
+counted":
+
+- `_on_ls_update`:
+  - Path 1: `close_time > prev_close` → BAR_UPDATE (+ possible CLOSE).
+  - Path 2: `prev_close is None or close_time == prev_close` → BAR_UPDATE
+    (+ possible CLOSE on cons_end flip).
+  - Path 3: everything else, i.e. `close_time < prev_close` → counted.
+- Same-timestamp updates (the realistic LS in-progress case) take
+  Path 2, **not** Path 3. The counter is incremented only for true
+  out-of-order. ✓
+
+Thread-safety note: `out_of_order_count` is read outside `_state_lock`
+in `out_of_order_counts()`. Reading an `int` attribute is GIL-atomic
+in CPython, so reads can be off-by-one relative to a concurrent
+increment but never corrupt or torn. Acceptable for an ops-metrics
+read.
+
+## New issues introduced by the fixes
+
+None of the fixes introduce a CRITICAL or HIGH regression. A small
+number of LOW-severity nits surfaced:
+
+### A1 (LOW — docstring drift) — module docstring in `hydration.py` shows the old decision tree
+
+**File:** `src/feed/hydration.py:10-23`
+
+The module's top-level decision tree:
+
+```text
+if len(cached) >= BACKFILL_BARS and is_fresh(newest):
+    # Cache-only: no REST call.
+elif cached:
+    # Cache-stale or short: REST top-up only the missing tail.
+else:
+    # No cache: REST fetch BACKFILL_BARS.
+```
+
+does not mention the H1 fallback (`cache_only_degraded`). A reader who
+trusts the module docstring would miss the new mode. The
+`PairHydrationReport` docstring (lines 95-110) covers all five modes
+correctly. Recommend a one-line addition to the module-level tree:
+"REST fails + cache >= MIN_USABLE_BARS: degrade to cache only".
+
+### A2 (LOW — undocumented DST fold caveat) — `_coerce_to_utc` should note the fall-back ambiguity behaviour
+
+**File:** `src/feed/hydration.py:310-320`
+
+The function correctly handles 99.99% of timestamps but silently
+defaults to fold=0 (BST) for the ambiguous fall-back hour. A one-line
+docstring note ("naive timestamps in the fall-back ambiguous hour
+default to BST/first-occurrence; explicit offset preferred") would
+inoculate future readers against assuming GMT-by-default.
+
+### A3 (LOW — gap-fill latest_candle nuance) — strategies must use `event.candle`, not `FeedManager.latest_candle()`, inside a gap-fill `BAR_CLOSE` handler
+
+**File:** `src/feed/feed_manager.py:497-514`
+
+During the per-bar BAR_CLOSE loop in `_gap_fill_on_resume`,
+`state.buffer.bulk_append(missing)` has already placed *every*
+backfilled bar in the buffer. So `latest_candle()` returns
+`missing[-1]` for every dispatched event in the loop, not the
+currently-dispatched bar. The contract documented in `on_event` and
+in `types.FeedEventKind.GAP_FILLED` does imply "use `event.candle`",
+but a Phase 8 author who reaches for `latest_candle()` inside a
+`BAR_CLOSE` handler would see surprising results during reconnects.
+One-line docstring addition to `_gap_fill_on_resume` (or to the
+`on_event` contract) is the minimal fix.
+
+### A4 (LOW — gap-fill blocks the LS thread on REST) — `_gap_fill_on_resume` is serial across pairs
+
+**File:** `src/feed/feed_manager.py:471-530`
+
+The loop is sequential: pair-1 REST → pair-2 REST → … on the LS
+reader thread, all inside `_on_ls_status`. For 4 pairs × ~1-2s per
+REST call, that's a 4-8 second window where the LS thread isn't
+servicing live ticks. Practical impact is small (gap-fills are rare
+and on already-resuming sessions, the LS SDK queues), but the parallel
+pattern used by `hydrate_pairs` could be reused here. Not blocking.
+
+## Test-quality observations on the new tests
+
+- **Probe round-trip test** is the kind of fixture-anchored regression
+  guard the original review explicitly asked for. Good.
+- **H1 boundary** at exactly `FEED_MIN_USABLE_BARS=50` is not tested
+  (30 fails, 80 degrades — gap of 20 either side). Not blocking, but a
+  one-line parameterised test would seal it.
+- **H2 test** explicitly asserts both the count (3) and the temporal
+  ordering of the BAR_CLOSEs. Catches the bug it set out to.
+- **H3 DST** transitions (spring-forward gap, fall-back ambiguity) are
+  not exercised. The summer/winter tests prove the offset is *applied*
+  but not the *transition* handling. Low priority — covered above
+  empirically.
+- **H4** test correctly distinguishes Path 3 from Path 2 (same-ts
+  update goes to BAR_UPDATE, not the counter), and uses `caplog` to
+  prove the WARNING fires. Solid.
+
+## Final recommendation
+
+**APPROVE FOR MERGE.**
+
+All four HIGH items and the C2 issue are properly fixed with code
+changes plus targeted tests that exercise the bug paths (not just
+smoke tests). C1 was disproved by the multi-tick probe; the parser is
+correct as written. No new CRITICAL or HIGH defects were introduced.
+The four LOW-severity nits (A1–A4) are all docstring-or-polish items
+that can land in a follow-up commit without blocking merge.
+
+Full suite is green: **`654 passed`** as claimed in the commit
+message. The unaddressed MEDIUM/LOW items from the original review
+remain valid for a follow-up pass but are explicitly out of scope per
+the re-review remit.
