@@ -934,17 +934,41 @@ class _RecordingAlerter:
 
     Mirrors the public surface (send / tick / close) and tracks the
     call ordering so tests can assert the FEED_STALE-after-transition
-    contract and the close-before-feed.stop ordering."""
+    contract and the close-before-feed.stop ordering.
 
-    def __init__(self) -> None:
+    L4 (Phase 9 cleanup): ``send`` asserts ``isinstance(alert, Alert)``
+    so a future regression that passes a dict / namespace / wrong type
+    surfaces here instead of slipping through silently. The real
+    TelegramAlerter doesn't enforce the type at runtime — the dataclass
+    discipline does — but the fake should not be more permissive than
+    production.
+
+    M4 (Phase 9 cleanup): ``send`` captures bot state at call-time
+    (when the optional ``state_getter`` is wired). The
+    FEED_STALE/FEED_RESUMED tests need to verify the state transition
+    happened BEFORE ``send`` runs — asserting on alerter-internal
+    call ordering (``send`` vs ``tick``) is necessary but not
+    sufficient. ``state_at_send`` pins the actual invariant.
+    """
+
+    def __init__(self, state_getter=None) -> None:
         self.sent: list = []
         self.ticks: int = 0
         self.closed: bool = False
         self.events: list[str] = []  # ordering log
+        self._state_getter = state_getter
+        self.state_at_send: list = []
 
     def send(self, alert) -> None:
+        from alerts import Alert
+        assert isinstance(alert, Alert), (
+            f"_RecordingAlerter.send expected an Alert instance, "
+            f"got {type(alert).__name__}"
+        )
         self.sent.append(alert)
         self.events.append(f"send:{alert.event_subtype}")
+        if self._state_getter is not None:
+            self.state_at_send.append(self._state_getter())
 
     def tick(self) -> None:
         self.ticks += 1
@@ -956,7 +980,13 @@ class _RecordingAlerter:
 
 
 def _build_with_alerter(monkeypatch, **kw) -> tuple:
-    """Build a BotLoop with a recording alerter wired in."""
+    """Build a BotLoop with a recording alerter wired in.
+
+    M4 (Phase 9 cleanup): the alerter's ``state_getter`` is wired
+    post-construction (closure on the freshly-built ``bot``) so the
+    FEED_STALE / FEED_RESUMED tests can pin the state-at-send
+    invariant — the actual contract the production code documents.
+    """
     alerter = _RecordingAlerter()
     bot, pieces = _build(monkeypatch, **kw)
     # Re-construct via the public API rather than reaching into _build —
@@ -976,6 +1006,7 @@ def _build_with_alerter(monkeypatch, **kw) -> tuple:
         clock=lambda: _NOW,
         alerter=alerter,  # type: ignore[arg-type]
     )
+    alerter._state_getter = lambda: bot.state
     pieces["alerter"] = alerter
     return bot, pieces
 
@@ -1043,7 +1074,14 @@ def test_event_failure_threshold_passes_reason_to_request_shutdown(monkeypatch) 
 def test_feed_stale_transitions_first_then_emits_alert_then_ticks(monkeypatch) -> None:
     """FEED_STALE ordering contract: state transition BEFORE the alert
     so the alert text never lies about current state. tick() runs
-    after the alert so any pending coalesced groups flush."""
+    after the alert so any pending coalesced groups flush.
+
+    M4 (Phase 9 cleanup): the prior version of this test only
+    asserted on send-vs-tick ordering — which is necessary but not
+    sufficient. A refactor that emits BEFORE transitioning would have
+    silently passed. ``state_at_send`` pins the actual invariant:
+    when ``send`` runs, ``bot.state`` must already be STALE.
+    """
     bot, pieces = _build_with_alerter(monkeypatch)
     bot.start()
     bot.mark_ready()
@@ -1056,12 +1094,16 @@ def test_feed_stale_transitions_first_then_emits_alert_then_ticks(monkeypatch) -
     ))
     assert initial_state == BotState.NORMAL
     assert bot.state == BotState.STALE  # transition happened
-    # Order: send FEED_STALE then tick (transition is internal — not
-    # recorded by the alerter, but the alerter sees send-then-tick).
+    # Order: send FEED_STALE then tick.
     assert pieces["alerter"].events == ["send:FEED_STALE", "tick"]
+    # M4: state was already STALE at the moment ``send`` was called —
+    # this is the load-bearing invariant the production code documents.
+    assert pieces["alerter"].state_at_send == [BotState.STALE]
 
 
 def test_feed_resumed_transitions_first_then_emits_alert_then_ticks(monkeypatch) -> None:
+    """M4 cleanup: same invariant for FEED_RESUMED — bot.state must
+    already be RESUMING at send-time."""
     bot, pieces = _build_with_alerter(monkeypatch)
     bot.start()
     bot.mark_ready()
@@ -1070,11 +1112,13 @@ def test_feed_resumed_transitions_first_then_emits_alert_then_ticks(monkeypatch)
     ))
     pieces["alerter"].events.clear()
     pieces["alerter"].sent.clear()
+    pieces["alerter"].state_at_send.clear()
     pieces["feed"].fire(FeedEvent(
         kind=FeedEventKind.FEED_RESUMED, pair="*", candle=None, timestamp=_NOW,
     ))
     assert bot.state == BotState.RESUMING
     assert pieces["alerter"].events == ["send:FEED_RESUMED", "tick"]
+    assert pieces["alerter"].state_at_send == [BotState.RESUMING]
     from alerts import AlertSeverity
     assert pieces["alerter"].sent[0].severity is AlertSeverity.INFO
 
@@ -1113,7 +1157,17 @@ def test_stop_calls_alerter_close_before_feed_stop(monkeypatch) -> None:
 
 def test_no_alerter_wired_does_not_raise_on_any_path(monkeypatch) -> None:
     """The alerter param is optional; with None, every alert path is
-    a no-op — no AttributeError, no silent crash."""
+    a no-op — no AttributeError, no silent crash.
+
+    L5 (Phase 9 cleanup): coverage extended to also exercise the
+    force-close path (``_send_alert(TRADE_CLOSED)`` plus
+    ``_recent_closes`` mutation) and the reconciliation dispatch
+    path (``_dispatch_reconciliation_alerts`` against the no-alerter
+    bot). A future refactor that, say, restructures ``_send_alert``
+    and removes the early ``if self._alerter is None: return`` guard
+    would silently break no-alerter mode without these branches
+    exercised.
+    """
     bot, pieces = _build(monkeypatch)  # default = no alerter
     bot.start()
     bot.mark_ready()
@@ -1121,6 +1175,50 @@ def test_no_alerter_wired_does_not_raise_on_any_path(monkeypatch) -> None:
     pieces["feed"].fire(FeedEvent(
         kind=FeedEventKind.FEED_STALE, pair="*", candle=None, timestamp=_NOW,
     ))
+    # L5 — exercise the force-close TRADE_CLOSED + deal-log path.
+    from execution.types import ExecutionPosition
+    from regime.labels import Direction, RegimeLabel
+    from risk.types import ForceCloseOrder
+    pos = ExecutionPosition(
+        deal_id="DEAL_NA1", deal_reference="REF",
+        pair="GBPUSD", direction=Direction.BULLISH,
+        regime_at_entry=RegimeLabel.TREND, strategy_name="trend_break",
+        size_units=1.0, entry_price=1.30050,
+        initial_sl_price=1.29900, current_sl_price=1.29900,
+        suggested_tp_price=1.30450,
+        entry_time_utc=_NOW, signal_source_candle_ts=_NOW,
+        be_moved=False, trail_active=False, sl_history=(),
+    )
+    pieces["positions"].upsert(pos)
+    bot._execute_force_close(ForceCloseOrder(
+        position_id="DEAL_NA1", pair="GBPUSD", reason="EOD_FLATTEN",
+    ))
+    # The deal log was still populated even without an alerter.
+    assert "DEAL_NA1" in bot._recent_closes
+
+    # L5 — exercise the reconciliation dispatch path with mixed events.
+    from execution.reconciliation import (
+        ReconciliationActions, ReconciliationOutcome,
+    )
+    from execution.types import (
+        ReconciliationEvent, ReconciliationKind,
+        ReconciliationReport, ReconciliationSeverity,
+    )
+    outcome = ReconciliationOutcome(
+        report=ReconciliationReport(
+            at_utc=_NOW,
+            events=(
+                ReconciliationEvent(
+                    at_utc=_NOW, severity=ReconciliationSeverity.ALERT,
+                    kind=ReconciliationKind.BROKER_ORPHAN, deal_id="X",
+                    pair="GBPUSD", message="orphan",
+                ),
+            ),
+        ),
+        actions=ReconciliationActions(),
+    )
+    bot._dispatch_reconciliation_alerts(outcome)  # must not raise
+
     bot.stop(inflight_timeout_sec=0.01)
 
 
@@ -1262,21 +1360,26 @@ def test_reconciliation_dispatches_alerts_for_actionable_kinds(monkeypatch) -> N
 
 
 def test_hydrate_returns_summary_dict(monkeypatch) -> None:
-    """hydrate() now returns {cached_bars, rest_bars} for the STARTUP
-    alert. Existing tests use a stub HydrationReport without per_pair;
-    we replace it with a real-shape stub here."""
+    """hydrate() returns {cached_bars, rest_bars, degraded_pairs} for
+    the STARTUP alert. M3 (Phase 9 cleanup) adds the degraded_pairs
+    list so the operator's first health-check signal surfaces
+    pair-level degraded state, not just aggregate row counts."""
     bot, pieces = _build_with_alerter(monkeypatch)
     pieces["feed"].hydrate_report = type("R", (), {
         "ok": True,
         "failed_pairs": (),
-        "degraded_pairs": (),
+        "degraded_pairs": ("EURUSD",),
         "per_pair": (
             type("P", (), {"cached_bars": 100, "rest_bars": 50})(),
             type("P", (), {"cached_bars": 80, "rest_bars": 20})(),
         ),
     })()
     summary = bot.hydrate()
-    assert summary == {"cached_bars": 180, "rest_bars": 70}
+    assert summary == {
+        "cached_bars": 180,
+        "rest_bars": 70,
+        "degraded_pairs": ["EURUSD"],
+    }
 
 
 def test_recent_closes_capped_at_max_with_oldest_pruned(monkeypatch) -> None:

@@ -266,9 +266,14 @@ class BotLoop:
     def hydrate(self) -> dict:
         """Hydrate every pair; return a summary dict for the STARTUP alert.
 
-        Returns ``{"cached_bars": <int>, "rest_bars": <int>}`` summed
-        across all per-pair reports. Raises on failure (preserves the
-        prior contract).
+        Returns ``{"cached_bars": <int>, "rest_bars": <int>,
+        "degraded_pairs": <list[str]>}`` summed across all per-pair
+        reports. ``degraded_pairs`` carries any pair that fell back
+        to cache after a REST top-up failed (M3, Session-3
+        commit-2b review) — surfaced in the STARTUP alert so the
+        operator's first health-check signal is honest about the
+        pair-level state, not just the aggregate row counts.
+        Raises on failure (preserves the prior contract).
         """
         report = self._feed.hydrate()
         logger.info(
@@ -284,6 +289,7 @@ class BotLoop:
         return {
             "cached_bars": sum(p.cached_bars for p in report.per_pair),
             "rest_bars": sum(p.rest_bars for p in report.per_pair),
+            "degraded_pairs": list(report.degraded_pairs),
         }
 
     def start(self) -> None:
@@ -744,10 +750,13 @@ class BotLoop:
             outcome = self._with_inflight_tracked(self._reconcile_once)
             self._periodic_failures.record_success()
             # Dispatch alerts only after applying actions so the
-            # operator sees the same view the bot acted on. INFO-level
-            # reconciliation events (OK_NO_OP, SL_UPDATED_FROM_BROKER,
-            # STALE_POSITION, SL_DRIFT_LARGE) are suppressed; only the
-            # operator-actionable kinds translate to alerts.
+            # operator sees the same view the bot acted on. Suppressed
+            # kinds: OK_NO_OP (INFO), SL_UPDATED_FROM_BROKER (INFO),
+            # STALE_POSITION (WARNING — informational), SL_DRIFT_LARGE
+            # (WARNING — handled internally). Only POSITION_CLOSED,
+            # BROKER_ORPHAN, MISSING_LOCAL_KEPT, MANUAL_SL_MOVE
+            # translate to alerts. See _reconciliation_event_to_alert
+            # for the per-kind rationale.
             self._dispatch_reconciliation_alerts(outcome)
         except Exception as exc:
             self._periodic_failures.record_failure(exc, now_utc=self._clock())
@@ -1220,9 +1229,12 @@ class BotLoop:
         - ``MISSING_LOCAL_KEPT`` → MISSING_LOCAL_KEPT (WARNING, RECONCILIATION)
         - ``MANUAL_SL_MOVE`` → MANUAL_SL_MOVE (WARNING, RECONCILIATION)
 
-        ``OK_NO_OP``, ``SL_UPDATED_FROM_BROKER``, ``STALE_POSITION``,
-        ``SL_DRIFT_LARGE`` are suppressed — informational for the
-        local log only.
+        Suppressed (with the reconciler's actual severity in
+        parentheses, NOT all INFO): ``OK_NO_OP`` (INFO),
+        ``SL_UPDATED_FROM_BROKER`` (INFO), ``STALE_POSITION``
+        (WARNING — informational only), ``SL_DRIFT_LARGE`` (WARNING
+        — bot already converged on broker truth). The per-kind
+        rationale lives in :py:meth:`_reconciliation_event_to_alert`.
         """
         if self._alerter is None:
             return

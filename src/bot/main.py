@@ -368,25 +368,39 @@ def _emit_startup_alert(
 ) -> None:
     """Construct and dispatch the STARTUP alert.
 
-    Format (as locked in the integration plan):
+    Format (as locked in the integration plan, plus the M3 degraded-
+    pair suffix added in the Phase 9 cleanup):
 
         🤖 BOT STARTUP
         Account: {DEMO|LIVE|?}
         Pairs: {N} ({pair list})
-        Hydration: {cached_bars} cached, {rest_bars} REST
+        Hydration: {cached_bars} cached, {rest_bars} REST [(degraded: <pair list>)]
         Build: {short_hash} ({branch})
+
+    M7 (Session-3 commit-2b review): ``_git_short_hash`` and
+    ``_git_branch_name`` shell out to ``git``, each with a 2s
+    timeout. The pre-cleanup body called ``_git_short_hash`` twice
+    (once in the body, once in the short_text), risking a
+    cumulative ~6s STARTUP stall if git was unresponsive. We capture
+    once into locals.
     """
     cached = int(hydration_summary.get("cached_bars", 0))
     rest = int(hydration_summary.get("rest_bars", 0))
+    degraded = list(hydration_summary.get("degraded_pairs", []))
     pair_list = ", ".join(pairs) if pairs else "(none)"
+    hydration_line = f"Hydration: {cached} cached, {rest} REST"
+    if degraded:
+        hydration_line += f" (degraded: {', '.join(degraded)})"
+    git_hash = _git_short_hash()
+    git_branch = _git_branch_name()
     full = (
         f"\U0001f916 BOT STARTUP\n"
         f"Account: {ig_env}\n"
         f"Pairs: {len(pairs)} ({pair_list})\n"
-        f"Hydration: {cached} cached, {rest} REST\n"
-        f"Build: {_git_short_hash()} ({_git_branch_name()})"
+        f"{hydration_line}\n"
+        f"Build: {git_hash} ({git_branch})"
     )
-    short = f"started ({_git_short_hash()}, {ig_env})"
+    short = f"started ({git_hash}, {ig_env})"
     alerter.send(
         Alert(
             category=AlertCategory.SYSTEM,
@@ -399,7 +413,11 @@ def _emit_startup_alert(
             debug={
                 "ig_env": ig_env,
                 "pairs": list(pairs),
-                "hydration": {"cached_bars": cached, "rest_bars": rest},
+                "hydration": {
+                    "cached_bars": cached,
+                    "rest_bars": rest,
+                    "degraded_pairs": degraded,
+                },
             },
         )
     )

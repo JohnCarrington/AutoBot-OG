@@ -348,12 +348,18 @@ class Executor:
         # without an alert, because SL_DRIFT_LARGE doesn't translate
         # to an alert). Fail loudly: log CRITICAL, fire a CRITICAL
         # AMEND_PERSIST_FAILED alert (bypasses coalescing), and
-        # re-raise the original persistence error so the caller can
-        # crash the bot rather than continue with desynced state.
-        # Emergency action: unlike open_from_signal we do NOT try to
-        # revert the amend automatically — a revert call is itself a
-        # broker round-trip that can fail, and a failed-revert loop is
-        # worse than a loud crash. Operator reconciles manually.
+        # re-raise the original persistence error so the BotLoop
+        # caller (_run_sl_evaluation) logs at exception level and
+        # continues — the bot does NOT crash automatically, but the
+        # operator now has a CRITICAL Telegram alert pointing them
+        # at the divergence. (Repeated failures may eventually trip
+        # the 5-strike event-failure counter and trigger
+        # FAILURE_THRESHOLD_TRIPPED, but a single occurrence does
+        # not.) Emergency action: unlike open_from_signal we do NOT
+        # try to revert the amend automatically — a revert call is
+        # itself a broker round-trip that can fail, and a
+        # failed-revert loop is worse than a loud alert. Operator
+        # reconciles manually.
         try:
             self._positions.upsert(updated)
         except Exception as upsert_exc:

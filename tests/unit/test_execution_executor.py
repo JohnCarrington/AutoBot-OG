@@ -465,12 +465,22 @@ def test_apply_amend_rejected_status_returns_failure(tmp_path: Path) -> None:
 
 
 class _RecordingAlerter:
-    """Test alerter that just records sent alerts."""
+    """Test alerter that just records sent alerts.
+
+    L4 (Phase 9 cleanup): assert isinstance(alert, Alert) so a future
+    regression that passes a dict / namespace surfaces here instead of
+    slipping through silently.
+    """
 
     def __init__(self) -> None:
         self.sent: list = []
 
     def send(self, alert) -> None:
+        from alerts import Alert
+        assert isinstance(alert, Alert), (
+            f"_RecordingAlerter.send expected an Alert instance, "
+            f"got {type(alert).__name__}"
+        )
         self.sent.append(alert)
 
     def tick(self) -> None:

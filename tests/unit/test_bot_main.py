@@ -87,10 +87,19 @@ def test_extract_tokens_raises_on_missing_cst() -> None:
 
 
 class _RecordingAlerter:
+    """L4 (Phase 9 cleanup): assert isinstance(alert, Alert) so a future
+    regression that passes a dict / namespace surfaces here instead of
+    slipping through silently."""
+
     def __init__(self) -> None:
         self.sent: list = []
 
     def send(self, alert) -> None:
+        from alerts import Alert
+        assert isinstance(alert, Alert), (
+            f"_RecordingAlerter.send expected an Alert instance, "
+            f"got {type(alert).__name__}"
+        )
         self.sent.append(alert)
 
     def tick(self) -> None:
@@ -146,12 +155,103 @@ def test_emit_startup_alert_payload_shape(monkeypatch) -> None:
     assert a.severity is AlertSeverity.INFO
     assert a.category is AlertCategory.SYSTEM
     assert a.pair is None
-    body = a.full_text
-    assert "BOT STARTUP" in body
-    assert "Account: DEMO" in body
-    assert "Pairs: 2 (GBPUSD, EURUSD)" in body
-    assert "Hydration: 180 cached, 70 REST" in body
-    assert "Build: abc1234 (feature/alerts-integration)" in body
+    # L1 (Phase 9 cleanup): pin the full structure so a refactor that
+    # drops the emoji, reorders lines, or joins with `, ` instead of
+    # `\n` fails this test instead of silently passing substring
+    # checks. The plan locked the format — the test should hold it.
+    expected_lines = [
+        "\U0001f916 BOT STARTUP",
+        "Account: DEMO",
+        "Pairs: 2 (GBPUSD, EURUSD)",
+        "Hydration: 180 cached, 70 REST",
+        "Build: abc1234 (feature/alerts-integration)",
+    ]
+    assert a.full_text == "\n".join(expected_lines)
+
+
+def test_emit_startup_alert_surfaces_degraded_pairs(monkeypatch) -> None:
+    """M3 (Phase 9 cleanup): when hydration succeeded but one or more
+    pairs fell back to cache-only (REST top-up failed), the STARTUP
+    alert appends a ``(degraded: <pair list>)`` suffix to the
+    Hydration line. The operator's first health-check signal is
+    honest about per-pair state, not just the aggregate row counts.
+    """
+    import sys
+    import bot.main  # noqa: F401
+    main_mod = sys.modules["bot.main"]
+    monkeypatch.setattr(main_mod, "_git_short_hash", lambda: "abc1234")
+    monkeypatch.setattr(main_mod, "_git_branch_name", lambda: "develop")
+    alerter = _RecordingAlerter()
+    _emit_startup_alert(
+        alerter=alerter,  # type: ignore[arg-type]
+        ig_env="DEMO",
+        pairs=("GBPUSD", "EURUSD"),
+        hydration_summary={
+            "cached_bars": 180,
+            "rest_bars": 70,
+            "degraded_pairs": ["EURUSD"],
+        },
+    )
+    body = alerter.sent[0].full_text
+    assert "Hydration: 180 cached, 70 REST (degraded: EURUSD)" in body
+    # debug payload also carries the structured info for log-only consumers.
+    assert alerter.sent[0].debug["hydration"]["degraded_pairs"] == ["EURUSD"]
+
+
+def test_emit_startup_alert_no_degraded_suffix_when_clean(monkeypatch) -> None:
+    """When degraded_pairs is empty (or absent), the Hydration line
+    has no trailing suffix — the operator sees a clean health line."""
+    import sys
+    import bot.main  # noqa: F401
+    main_mod = sys.modules["bot.main"]
+    monkeypatch.setattr(main_mod, "_git_short_hash", lambda: "abc1234")
+    monkeypatch.setattr(main_mod, "_git_branch_name", lambda: "develop")
+    alerter = _RecordingAlerter()
+    _emit_startup_alert(
+        alerter=alerter,  # type: ignore[arg-type]
+        ig_env="DEMO",
+        pairs=("GBPUSD",),
+        hydration_summary={
+            "cached_bars": 180,
+            "rest_bars": 70,
+            "degraded_pairs": [],
+        },
+    )
+    body = alerter.sent[0].full_text
+    assert "Hydration: 180 cached, 70 REST\n" in body
+    assert "degraded" not in body
+
+
+def test_emit_startup_alert_calls_git_helpers_once_each(monkeypatch) -> None:
+    """M7 (Phase 9 cleanup): the pre-cleanup body called
+    ``_git_short_hash`` twice (once in body, once in short_text). On a
+    git-unresponsive host that's two 2s timeouts → 4s STARTUP stall.
+    Pin the single-invocation contract so a future regression doesn't
+    silently re-introduce the duplication."""
+    import sys
+    import bot.main  # noqa: F401
+    main_mod = sys.modules["bot.main"]
+    hash_calls: list = []
+    branch_calls: list = []
+    monkeypatch.setattr(
+        main_mod,
+        "_git_short_hash",
+        lambda: hash_calls.append(1) or "abc1234",
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_git_branch_name",
+        lambda: branch_calls.append(1) or "develop",
+    )
+    alerter = _RecordingAlerter()
+    _emit_startup_alert(
+        alerter=alerter,  # type: ignore[arg-type]
+        ig_env="DEMO",
+        pairs=("GBPUSD",),
+        hydration_summary={"cached_bars": 0, "rest_bars": 0},
+    )
+    assert len(hash_calls) == 1
+    assert len(branch_calls) == 1
 
 
 def test_emit_startup_alert_with_unknown_git(monkeypatch) -> None:
@@ -183,8 +283,8 @@ def test_emit_shutdown_alert_clean_is_info(monkeypatch) -> None:
     assert a.severity is AlertSeverity.INFO
     assert a.category is AlertCategory.SYSTEM
     assert a.pair is None
-    assert "BOT SHUTDOWN" in a.full_text
-    assert "clean" in a.full_text.lower()
+    # L1 (Phase 9 cleanup): pin the full body shape, not just substrings.
+    assert a.full_text == "\U0001f916 BOT SHUTDOWN — clean exit"
 
 
 def test_emit_shutdown_alert_crashed_is_critical(monkeypatch) -> None:
@@ -195,4 +295,7 @@ def test_emit_shutdown_alert_crashed_is_critical(monkeypatch) -> None:
     a = alerter.sent[0]
     from alerts import AlertSeverity
     assert a.severity is AlertSeverity.CRITICAL
-    assert "CRASHED" in a.full_text
+    # L1 (Phase 9 cleanup): exact body, not just "CRASHED" substring.
+    assert a.full_text == (
+        "\U0001f916 BOT SHUTDOWN (CRASHED) — failure threshold tripped"
+    )
