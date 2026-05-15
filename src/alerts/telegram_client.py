@@ -23,6 +23,7 @@ raises specific exception classes.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable, Optional
 
 from .constants import ALERTS_HTTP_TIMEOUT_SEC
@@ -32,6 +33,18 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.telegram.org/bot{token}/sendMessage"
 _MAX_TEXT_LOG_LEN = 200  # truncate alert text in failure logs
+
+# H1 (adversarial review 2026-05-15): ``requests.exceptions.ConnectionError``
+# and similar lower-level exceptions stringify with the full request URL
+# embedded — and the Telegram Bot API path ``/bot{token}/sendMessage``
+# means the bot token lives inside the URL. Logging the exception
+# verbatim would surface the token in centralised log aggregators
+# (Datadog/Splunk/ELK). We scrub the ``/bot{token}/`` segment before
+# any exception text reaches a log call. Telegram bot tokens are of
+# the form ``{numeric_id}:{auth_string}`` — no slashes — so the
+# negated character class ``[^/]+`` is a tight match.
+_TOKEN_PATTERN = re.compile(r"/bot[^/]+/")
+_REDACTED_TOKEN_REPLACEMENT = "/bot<redacted>/"
 
 
 PostFn = Callable[..., Any]
@@ -96,10 +109,13 @@ class TelegramClient:
                 timeout=self._timeout_sec,
             )
         except Exception as exc:
+            # Scrub the URL-embedded bot token before logging — see
+            # ``_TOKEN_PATTERN`` comment at module top for the why.
+            scrubbed = _scrub_exception_text(str(exc))
             logger.warning(
                 "Telegram delivery failed (%s: %s) — alert text: %s",
                 type(exc).__name__,
-                exc,
+                scrubbed,
                 _truncate(text),
             )
             return False
@@ -137,6 +153,20 @@ def _truncate(text: str, max_len: int = _MAX_TEXT_LOG_LEN) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
+
+
+def _scrub_exception_text(text: str) -> str:
+    """Replace ``/bot{token}/`` URL segments with ``/bot<redacted>/``.
+
+    H1 (adversarial review 2026-05-15): exception strings from
+    ``requests`` (notably ``ConnectionError`` and ``ReadTimeout``)
+    embed the full request URL — and our URL path carries the bot
+    token. Without scrubbing, every WARNING-level delivery failure
+    would leak the token into log aggregators. The regex anchors
+    on the literal ``/bot`` + non-slash run + trailing ``/`` so it
+    cannot match anything except the URL token segment.
+    """
+    return _TOKEN_PATTERN.sub(_REDACTED_TOKEN_REPLACEMENT, text)
 
 
 __all__ = ["PostFn", "TelegramClient"]

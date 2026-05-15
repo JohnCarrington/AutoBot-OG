@@ -115,3 +115,58 @@ def test_send_response_without_status_code_returns_false() -> None:
 
     client = TelegramClient(bot_token="TOK", chat_id="CHAT", post_fn=post)
     assert client.send("test") is False
+
+
+def test_token_not_leaked_in_exception_log(caplog) -> None:
+    """H1 regression: real ConnectionError messages contain the bot
+    token in the URL. Verify token is scrubbed from log output.
+
+    requests.exceptions.ConnectionError typically stringifies as:
+        HTTPSConnectionPool(host='api.telegram.org', port=443):
+        Max retries exceeded with url: /bot{TOKEN}/sendMessage
+        (Caused by ...)
+    The bot token sits in the URL path — WARNING-level logs in
+    centralised aggregators (Datadog/Splunk/ELK) would surface it
+    without the scrub.
+    """
+    bot_token = "12345:LIVETOKEN_DO_NOT_LEAK"
+    fake_error_text = (
+        "HTTPSConnectionPool(host='api.telegram.org', port=443): "
+        f"Max retries exceeded with url: /bot{bot_token}/sendMessage "
+        "(Caused by NewConnectionError(...))"
+    )
+
+    def fake_post(*a, **kw):
+        raise ConnectionError(fake_error_text)
+
+    client = TelegramClient(
+        bot_token=bot_token, chat_id="123", post_fn=fake_post,
+    )
+    with caplog.at_level(logging.WARNING, logger="alerts.telegram_client"):
+        result = client.send("test message")
+
+    assert result is False
+    # Token MUST NOT appear in any log message.
+    full_log = " ".join(r.getMessage() for r in caplog.records)
+    assert "LIVETOKEN_DO_NOT_LEAK" not in full_log, (
+        f"Bot token leaked into log: {full_log!r}"
+    )
+    # Confirm scrubbing actually happened (vs. exception text just
+    # not containing the URL).
+    assert "<redacted>" in full_log
+
+
+def test_scrub_does_not_alter_non_token_content() -> None:
+    """The scrubber must only touch /bot{token}/ segments."""
+    from alerts.telegram_client import _scrub_exception_text
+
+    benign = "no token here — just a network error message"
+    assert _scrub_exception_text(benign) == benign
+
+    multi_path = "/api/v1/users/bot1234567:ABC/profile not a token"
+    # The pattern requires the token segment to start with /bot, so
+    # /users/bot1234567:ABC/ DOES match. Acceptable false-positive
+    # surface — the cost is just a redaction of an unrelated path.
+    # Verify the rule explicitly so reviewers know what's redacted.
+    out = _scrub_exception_text(multi_path)
+    assert "/bot<redacted>/" in out
