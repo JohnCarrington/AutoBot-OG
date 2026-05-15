@@ -1,0 +1,78 @@
+{
+  "probe_date": "2026-05-15",
+  "ig_acc_type": "DEMO",
+  "ig_host": "https://demo-apd.marketdatasystems.com",
+  "test_epic": "CS.D.GBPUSD.TODAY.IP",
+  "attempts": [
+    {
+      "name": "CHART:5MINUTE",
+      "item": "CHART:CS.D.GBPUSD.TODAY.IP:5MINUTE",
+      "subscription_confirmed": true,
+      "error_code": null,
+      "error_message": null,
+      "sample_payload": {
+        "UTM": "1778837400000",
+        "LTV": "252",
+        "CONS_TICK_COUNT": "252",
+        "CONS_END": "0",
+        "BID_OPEN": "13339.2",
+        "BID_HIGH": "13342.2",
+        "BID_LOW": "13338.4",
+        "BID_CLOSE": "13340.8",
+        "OFR_OPEN": "13340.1",
+        "OFR_HIGH": "13343.1",
+        "OFR_LOW": "13339.3",
+        "OFR_CLOSE": "13341.7"
+      },
+      "fields_received": [
+        "UTM",
+        "LTV",
+        "CONS_TICK_COUNT",
+        "CONS_END",
+        "BID_OPEN",
+        "BID_HIGH",
+        "BID_LOW",
+        "BID_CLOSE",
+        "OFR_OPEN",
+        "OFR_HIGH",
+        "OFR_LOW",
+        "OFR_CLOSE"
+      ],
+      "note": null
+    },
+    {
+      "name": "CHART:TICK",
+      "item": "CHART:CS.D.GBPUSD.TODAY.IP:TICK",
+      "subscription_confirmed": false,
+      "error_code": 24,
+      "error_message": "Invalid mode for these items",
+      "sample_payload": null,
+      "fields_received": null,
+      "note": null
+    },
+    {
+      "name": "MARKET",
+      "item": "MARKET:CS.D.GBPUSD.TODAY.IP",
+      "subscription_confirmed": true,
+      "error_code": null,
+      "error_message": null,
+      "sample_payload": {
+        "UPDATE_TIME": "10:33:45",
+        "BID": "13340.8",
+        "OFFER": "13341.7",
+        "MARKET_STATE": "TRADEABLE"
+      },
+      "fields_received": [
+        "UPDATE_TIME",
+        "BID",
+        "OFFER",
+        "MARKET_STATE"
+      ],
+      "note": null
+    }
+  ],
+  "working_adapter": "CHART:5MINUTE",
+  "recommendation": "Use CHART:5MINUTE (CHART:CS.D.GBPUSD.TODAY.IP:5MINUTE) with fields ['UTM', 'LTV', 'CONS_TICK_COUNT', 'CONS_END', 'BID_OPEN', 'BID_HIGH', 'BID_LOW', 'BID_CLOSE', 'OFR_OPEN', 'OFR_HIGH', 'OFR_LOW', 'OFR_CLOSE'] for v1 native 5m candle subscription.",
+  "fatal_error": null,
+  "generated_at_utc": "2026-05-15T09:33:51.969344+00:00"
+}

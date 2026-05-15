@@ -26,6 +26,13 @@ dependencies = [
     # ig_rest.auth module to load credentials from .env. Pinned loosely
     # because it has no surface-shaped API in our wrapper.
     "python-dotenv>=1.0",
+    # Phase 7 — Lightstreamer streaming client for IG native 5m candle
+    # subscription (CHART:{epic}:5MINUTE, MERGE mode). Pinned to the
+    # exact version installed on AutoBotV1 (verified via
+    # `pip show lightstreamer-client-lib` on prod). PyPI dist name is
+    # `lightstreamer-client-lib`; the import path is `lightstreamer.client`.
+    # Probe results: scripts/probe_lightstreamer_output_2026-05-15.json.
+    "lightstreamer-client-lib==1.0.3",
 ]
 
 [tool.setuptools.packages.find]
