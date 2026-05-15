@@ -56,6 +56,15 @@ from .types import BotRuntimeConfig
 logger = logging.getLogger("bot.main")
 
 
+# Exit codes (locked Phase 8 + Phase 10):
+# - 0: graceful shutdown
+# - 1: pre-flight failure
+# - 2: runtime crash (failure threshold trip)
+# - 3: refused-to-start guard (shadow_mode + non-empty positions; H1
+#      layer 1 from Phase 10 review)
+EXIT_ABORT: int = 3
+
+
 # ---------------------------------------------------------------------------
 # Public entrypoint
 # ---------------------------------------------------------------------------
@@ -66,7 +75,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     load_dotenv()  # populate os.environ from .env before any constant read
     setup_logging(level=BOT_LOG_LEVEL, log_file=BOT_LOG_FILE or None)
     ig_env = (os.getenv("IG_ACC_TYPE") or "?").upper()
-    logger.info("AutoBot-OG main() starting (env=%s)", ig_env)
+    shadow_mode = _read_shadow_mode_env()
+    logger.info(
+        "AutoBot-OG main() starting (env=%s, shadow_mode=%s)",
+        ig_env, shadow_mode,
+    )
 
     config = _load_config()
 
@@ -87,13 +100,44 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # --- Build the runtime tree -----------------------------------------
     try:
-        bot, subscriber = _build_runtime(config, alerter=alerter)
+        bot, subscriber = _build_runtime(
+            config, alerter=alerter, shadow_mode=shadow_mode,
+        )
     except Exception:
         logger.exception("Failed to build runtime tree")
         # No bot constructed → the alerter never reached BotLoop, so
         # close it directly so any pending state drains.
         alerter.close()
         return 1
+
+    # --- H1 layer 1 (Phase 10 review): refuse to start in shadow mode
+    #     with pre-existing positions. SHADOW_MODE only intercepts the
+    #     open-position broker call; pre-existing positions would still
+    #     trigger real apply_amend / close_position calls via
+    #     _run_sl_evaluation and _execute_force_close. Operator must
+    #     close existing positions (via IG web UI) before enabling
+    #     shadow mode for re-validation. CRITICAL Telegram alert so
+    #     the operator sees the abort even if they're not watching the
+    #     systemctl status.
+    if shadow_mode:
+        existing = bot.position_manager_for_startup_check().all()
+        if existing:
+            deal_ids = [p.deal_id for p in existing]
+            msg = (
+                f"Cannot start in SHADOW_MODE with {len(existing)} "
+                f"existing position(s): {deal_ids}. SHADOW_MODE only "
+                f"intercepts new opens; pre-existing positions would "
+                f"trigger real broker amends and force-closes. Close "
+                f"the position(s) via IG web UI (and clear "
+                f"data/execution/positions.json) before re-enabling "
+                f"SHADOW_MODE."
+            )
+            logger.critical(msg)
+            _emit_startup_aborted_alert(
+                alerter=alerter, message=msg, deal_ids=deal_ids,
+            )
+            alerter.close()
+            return EXIT_ABORT
 
     # --- Signal wiring (set before start() so a fast SIGINT works) ------
     def _signal_handler(signum: int, _frame) -> None:
@@ -139,6 +183,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         ig_env=ig_env,
         pairs=config.pairs,
         hydration_summary=hydration_summary or {"cached_bars": 0, "rest_bars": 0},
+        shadow_mode=shadow_mode,
     )
 
     # --- Main thread: block on shutdown event ---------------------------
@@ -194,6 +239,7 @@ def _build_runtime(
     config: BotRuntimeConfig,
     *,
     alerter: Optional[TelegramAlerter] = None,
+    shadow_mode: bool = False,
 ) -> tuple[BotLoop, LightstreamerSubscriber]:
     """Wire all the Phase 1-7 components into a :class:`BotLoop`.
 
@@ -202,6 +248,11 @@ def _build_runtime(
     and Telegram client. Tests that don't care about alerts can omit
     it; production wiring constructs one in :func:`main` and passes
     it here.
+
+    Phase 10: ``shadow_mode`` (default false = safe) propagates to
+    BotLoop only — the executor stays a narrow IG adapter and never
+    knows about the deployment mode. The intercept lives in
+    :py:meth:`BotLoop._evaluate_and_execute`.
     """
     # IG session + client.
     session = create_ig_service()
@@ -286,6 +337,7 @@ def _build_runtime(
         regime_engines=regime_engines,  # shared with RiskGuard (C2)
         clock=lambda: datetime.now(timezone.utc),
         alerter=alerter,
+        shadow_mode=shadow_mode,
     )
 
     # ``start_live`` creates the subscriber; until then ``captured`` is
@@ -365,17 +417,23 @@ def _emit_startup_alert(
     ig_env: str,
     pairs: tuple[str, ...],
     hydration_summary: dict,
+    shadow_mode: bool = False,
 ) -> None:
     """Construct and dispatch the STARTUP alert.
 
     Format (as locked in the integration plan, plus the M3 degraded-
-    pair suffix added in the Phase 9 cleanup):
+    pair suffix added in Phase 9 cleanup, plus the ``[SHADOW MODE]``
+    title-line marker added in Phase 10):
 
-        🤖 BOT STARTUP
+        🤖 BOT STARTUP [SHADOW MODE]?
         Account: {DEMO|LIVE|?}
         Pairs: {N} ({pair list})
         Hydration: {cached_bars} cached, {rest_bars} REST [(degraded: <pair list>)]
         Build: {short_hash} ({branch})
+
+    The ``[SHADOW MODE]`` suffix on the title line is the operator's
+    immediate signal that no real trades will fire on this run —
+    matching the boot-time WARNING the BotLoop logs in shadow mode.
 
     M7 (Session-3 commit-2b review): ``_git_short_hash`` and
     ``_git_branch_name`` shell out to ``git``, each with a 2s
@@ -393,14 +451,19 @@ def _emit_startup_alert(
         hydration_line += f" (degraded: {', '.join(degraded)})"
     git_hash = _git_short_hash()
     git_branch = _git_branch_name()
+    title = "\U0001f916 BOT STARTUP"
+    if shadow_mode:
+        title += " [SHADOW MODE]"
     full = (
-        f"\U0001f916 BOT STARTUP\n"
+        f"{title}\n"
         f"Account: {ig_env}\n"
         f"Pairs: {len(pairs)} ({pair_list})\n"
         f"{hydration_line}\n"
         f"Build: {git_hash} ({git_branch})"
     )
     short = f"started ({git_hash}, {ig_env})"
+    if shadow_mode:
+        short += " [SHADOW]"
     alerter.send(
         Alert(
             category=AlertCategory.SYSTEM,
@@ -413,6 +476,7 @@ def _emit_startup_alert(
             debug={
                 "ig_env": ig_env,
                 "pairs": list(pairs),
+                "shadow_mode": shadow_mode,
                 "hydration": {
                     "cached_bars": cached,
                     "rest_bars": rest,
@@ -421,6 +485,51 @@ def _emit_startup_alert(
             },
         )
     )
+
+
+def _emit_startup_aborted_alert(
+    *,
+    alerter: TelegramAlerter,
+    message: str,
+    deal_ids: list[str],
+) -> None:
+    """CRITICAL alert for the H1 layer-1 refusal-to-start path.
+
+    Severity CRITICAL bypasses coalescing so the alert ships
+    immediately even if the alerter is closed in the same call
+    chain. The body restates the abort message verbatim so the
+    operator sees the offending deal_ids in Telegram.
+    """
+    alerter.send(
+        Alert(
+            category=AlertCategory.SYSTEM,
+            event_subtype="STARTUP_ABORTED",
+            severity=AlertSeverity.CRITICAL,
+            pair=None,
+            full_text=f"⛔ BOT STARTUP ABORTED\n{message}",
+            short_text=(
+                f"startup aborted: shadow_mode + {len(deal_ids)} "
+                f"existing position(s)"
+            ),
+            timestamp=datetime.now(timezone.utc),
+            debug={
+                "reason": "shadow_mode_with_existing_positions",
+                "deal_ids": list(deal_ids),
+            },
+        )
+    )
+
+
+def _read_shadow_mode_env() -> bool:
+    """Read ``BOT_SHADOW_MODE`` env var with a strict truthy parse.
+
+    Default false (safe). Accepts ``true|1|yes|on`` (case-insensitive)
+    as truthy; everything else is false. Strict parsing means a typo
+    like ``BOT_SHADOW_MODE=trues`` falls back to false (safe) rather
+    than truthy-by-non-empty-string.
+    """
+    raw = (os.getenv("BOT_SHADOW_MODE") or "").strip().lower()
+    return raw in ("true", "1", "yes", "on")
 
 
 def _emit_shutdown_alert(

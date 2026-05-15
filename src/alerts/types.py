@@ -5,18 +5,28 @@ use to tag it. The alerter / coalescer / formatter all consume these
 types — they're defined here once so the rest of the module can stay
 focused on behaviour.
 
-Severity (locked in the Phase 9 plan):
+Severity (locked in the Phase 9 plan; Phase 10 added SHADOW_TRADE +
+HEALTHCHECK_FAILED for shadow-mode and pre-market healthcheck):
 
 - ``INFO`` — normal lifecycle: TRADE_OPENED, TRADE_CLOSED, STARTUP,
-  SHUTDOWN (clean), FEED_RESUMED.
+  SHUTDOWN (clean), FEED_RESUMED, SHADOW_TRADE (Phase 10 — would-be
+  trade caught by SHADOW_MODE intercept, no broker call).
 - ``WARNING`` — operator should look but the bot keeps running:
   AMEND_FAILED, BROKER_ORPHAN, MISSING_LOCAL_KEPT, MANUAL_SL_MOVE,
-  FEED_STALE.
+  FEED_STALE, SHADOW_GUARD_BLOCKED (Phase 10 H1 layer 2 —
+  defense-in-depth: shadow_mode is true but a position-manage
+  broker call was about to fire; layer 1 should have refused
+  startup so this firing means a code path bypassed layer 1).
 - ``CRITICAL`` — bot-stopping conditions and state-divergence
   emergencies: FAILURE_THRESHOLD_TRIPPED, SHUTDOWN (after
   crashed=True), AMEND_PERSIST_FAILED (H1, Session-3 commit-2b
   review — broker accepted amend, local persist failed; operator
-  must reconcile manually).
+  must reconcile manually), HEALTHCHECK_FAILED (Phase 10 —
+  pre-market healthcheck reported one or more hard failures; bot
+  should not start trading until resolved), STARTUP_ABORTED
+  (Phase 10 H1 layer 1 — refused to start because the runtime
+  state would have made shadow_mode unsafe; e.g.,
+  shadow_mode=true with non-empty positions.json).
 
 CRITICAL is the only severity that bypasses coalescing — see
 :py:mod:`alerts.coalescer`. Reserving the immediate-send channel for
@@ -66,6 +76,7 @@ EVENT_SUBTYPES: tuple[str, ...] = (
     "TRADE_CLOSED",
     "AMEND_FAILED",
     "AMEND_PERSIST_FAILED",
+    "SHADOW_TRADE",
     # RECONCILIATION
     "BROKER_ORPHAN",
     "MISSING_LOCAL_KEPT",
@@ -76,6 +87,9 @@ EVENT_SUBTYPES: tuple[str, ...] = (
     "FEED_STALE",
     "FEED_RESUMED",
     "FAILURE_THRESHOLD_TRIPPED",
+    "HEALTHCHECK_FAILED",
+    "STARTUP_ABORTED",
+    "SHADOW_GUARD_BLOCKED",
 )
 
 

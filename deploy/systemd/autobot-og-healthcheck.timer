@@ -1,0 +1,16 @@
+[Unit]
+Description=Run AutoBot-OG healthcheck every weekday at 05:45 UTC
+
+[Timer]
+# Pre-market: roughly 75 minutes before London FX open (07:00 UTC
+# during BST, 08:00 UTC otherwise). Gives the operator time to
+# investigate any HEALTHCHECK_FAILED alert and resolve before the
+# bot's first session-active bar.
+OnCalendar=Mon..Fri 05:45 UTC
+# Persistent=true catches up missed runs (e.g. droplet was rebooted
+# overnight) by firing once on next boot.
+Persistent=true
+Unit=autobot-og-healthcheck.service
+
+[Install]
+WantedBy=timers.target
