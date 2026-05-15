@@ -64,8 +64,18 @@ def test_alert_default_debug_is_independent_dict() -> None:
 
 
 def test_coalesce_key_tuple_shape() -> None:
-    a = _alert(category=AlertCategory.TRADE, event_subtype="TRADE_OPENED", pair="GBPUSD")
-    assert a.coalesce_key() == (AlertCategory.TRADE, "TRADE_OPENED", "GBPUSD")
+    a = _alert(
+        category=AlertCategory.TRADE,
+        event_subtype="TRADE_OPENED",
+        pair="GBPUSD",
+        severity=AlertSeverity.INFO,
+    )
+    assert a.coalesce_key() == (
+        AlertCategory.TRADE,
+        "TRADE_OPENED",
+        "GBPUSD",
+        AlertSeverity.INFO,
+    )
 
 
 def test_coalesce_key_distinguishes_pairs() -> None:
@@ -76,5 +86,27 @@ def test_coalesce_key_distinguishes_pairs() -> None:
 
 
 def test_coalesce_key_pair_can_be_none_for_system_alerts() -> None:
-    a = _alert(category=AlertCategory.SYSTEM, event_subtype="STARTUP", pair=None)
-    assert a.coalesce_key() == (AlertCategory.SYSTEM, "STARTUP", None)
+    a = _alert(
+        category=AlertCategory.SYSTEM,
+        event_subtype="STARTUP",
+        pair=None,
+        severity=AlertSeverity.INFO,
+    )
+    assert a.coalesce_key() == (
+        AlertCategory.SYSTEM,
+        "STARTUP",
+        None,
+        AlertSeverity.INFO,
+    )
+
+
+def test_coalesce_key_distinguishes_severity() -> None:
+    """M1 (Phase 9 review): severity is part of the key.
+
+    Two alerts with the same (category, event_subtype, pair) but
+    different severities must NOT collapse into one bullet list — a
+    severity escalation would otherwise hide behind the lower one.
+    """
+    info = _alert(severity=AlertSeverity.INFO)
+    warning = _alert(severity=AlertSeverity.WARNING)
+    assert info.coalesce_key() != warning.coalesce_key()

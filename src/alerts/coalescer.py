@@ -2,11 +2,12 @@
 
 The coalescer's job is to collapse bursts of similar events into one
 Telegram message instead of N individual ones. The grouping key is
-``(category, event_subtype, pair)`` (locked in the Phase 9 plan
-refinement) — so a single GBPUSD TRADE_OPENED followed 25 seconds
-later by a single EURUSD TRADE_OPENED produces *two* messages
-(different keys), but three BROKER_ORPHAN findings for the same pair
-in the same 30-second window become *one* summary.
+``(category, event_subtype, pair, severity)`` (locked in the Phase 9
+plan, with severity added in commit 2a per M1 from the adversarial
+review) — so a single GBPUSD TRADE_OPENED followed 25 seconds later
+by a single EURUSD TRADE_OPENED produces *two* messages (different
+keys), but three BROKER_ORPHAN findings for the same pair in the
+same 30-second window become *one* summary.
 
 Semantics:
 
@@ -44,8 +45,16 @@ from typing import Callable, Optional
 from .types import Alert, AlertCategory, AlertSeverity
 
 
-CoalesceKey = tuple[AlertCategory, str, Optional[str]]
-"""``(category, event_subtype, pair)`` — locked in the Phase 9 plan."""
+CoalesceKey = tuple[AlertCategory, str, Optional[str], AlertSeverity]
+"""``(category, event_subtype, pair, severity)``.
+
+Locked in the Phase 9 plan; severity added in commit 2a per M1 from
+the Phase 9 adversarial review. In practice the event-subtype
+catalogue assigns severity deterministically, so adding severity
+rarely changes runtime grouping — but it makes the "alerts of
+different severity never merge" invariant explicit at the type level
+instead of implicit in the catalogue.
+"""
 
 
 @dataclass
@@ -86,6 +95,7 @@ class AlertCoalescer:
             lambda: datetime.now(timezone.utc)
         )
         self._pending: dict[CoalesceKey, _PendingGroup] = {}
+        self._closed: bool = False
 
     # ------------------------------------------------------------------
     # Properties
@@ -99,6 +109,17 @@ class AlertCoalescer:
     def pending_count(self) -> int:
         """Total alerts currently held across all pending groups."""
         return sum(len(g.alerts) for g in self._pending.values())
+
+    @property
+    def closed(self) -> bool:
+        """True after :py:meth:`close` has been called.
+
+        L5 (Phase 9 review): the alerter checks this so a late
+        ``send()`` arriving after shutdown drain logs a WARNING and
+        drops the alert instead of silently buffering it into a
+        ``_pending`` group that will never flush.
+        """
+        return self._closed
 
     # ------------------------------------------------------------------
     # Public surface
@@ -127,12 +148,22 @@ class AlertCoalescer:
         key = alert.coalesce_key()
 
         if alert.severity is AlertSeverity.CRITICAL:
-            # CRITICAL bypasses coalescing. If a same-key non-CRITICAL
-            # group is pending, flush it FIRST so the ordering on the
-            # operator's screen reads as it happened.
-            same_key_pending = self._pending.pop(key, None)
-            if same_key_pending is not None and same_key_pending.alerts:
-                batches.append(same_key_pending.alerts)
+            # CRITICAL bypasses coalescing. Flush any pending groups
+            # for the SAME (category, event_subtype, pair) prefix
+            # ahead of the CRITICAL so the operator's screen reads in
+            # arrival order. Severity is part of the full coalesce key
+            # (M1), but for the timeline-preservation guarantee we
+            # match on the prefix — otherwise a contrived burst of
+            # WARNING + CRITICAL of the same subtype would ship the
+            # CRITICAL first and leave the WARNING pending.
+            prefix = (alert.category, alert.event_subtype, alert.pair)
+            matching_keys = [
+                k for k in self._pending if k[:3] == prefix
+            ]
+            for k in matching_keys:
+                group = self._pending.pop(k)
+                if group.alerts:
+                    batches.append(group.alerts)
             batches.append([alert])
             return batches
 
@@ -172,16 +203,38 @@ class AlertCoalescer:
         self._pending.clear()
         return out
 
+    def close(self) -> None:
+        """Mark the coalescer closed. Idempotent.
+
+        L5 (Phase 9 review): pair with :py:meth:`drain_all` during the
+        shutdown sequence. After this returns, :py:attr:`closed` is
+        ``True`` and the alerter will refuse subsequent ``send()``
+        calls instead of buffering alerts that would never flush.
+        """
+        self._closed = True
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
     def _flush_elapsed(self, *, now: datetime) -> list[list[Alert]]:
-        """Pop and return every pending group whose window has elapsed."""
+        """Pop and return every pending group whose window has elapsed.
+
+        M2 (Phase 9 review): a backwards clock jump (NTP correction,
+        DST-confused naive clock injected in tests) counts as
+        "elapsed". The alternative — silently holding the group until
+        the wall clock catches up — would mean an alert disappears for
+        the duration of the jump. Treating ``now < first_arrival_utc``
+        as a flush trigger is the conservative choice: at worst it
+        ships a same-key alert as two messages instead of one (the
+        coalescing was opportunistic anyway), but it never silently
+        buries an alert behind a clock anomaly.
+        """
         ready: list[list[Alert]] = []
         expired_keys: list[CoalesceKey] = []
         for key, group in self._pending.items():
-            if now - group.first_arrival_utc >= self._window:
+            elapsed = now - group.first_arrival_utc
+            if elapsed.total_seconds() < 0 or elapsed >= self._window:
                 if group.alerts:
                     ready.append(list(group.alerts))
                 expired_keys.append(key)

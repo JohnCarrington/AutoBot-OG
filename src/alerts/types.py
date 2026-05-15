@@ -106,9 +106,21 @@ class Alert:
     timestamp: Optional[datetime] = None
     debug: dict[str, Any] = field(default_factory=dict)
 
-    def coalesce_key(self) -> tuple[AlertCategory, str, Optional[str]]:
-        """Return the tuple used by :py:class:`AlertCoalescer` to group alerts."""
-        return (self.category, self.event_subtype, self.pair)
+    def coalesce_key(
+        self,
+    ) -> tuple[AlertCategory, str, Optional[str], AlertSeverity]:
+        """Return the tuple used by :py:class:`AlertCoalescer` to group alerts.
+
+        M1 (Phase 9 review): severity is part of the key. Without it,
+        two alerts with the same ``(category, event_subtype, pair)``
+        but different severities would coalesce into a single bullet
+        list, hiding a severity escalation from the operator. In
+        practice the existing event-subtype catalogue assigns severity
+        deterministically per subtype, so this is mostly belt-and-
+        braces — but it makes the invariant explicit at the type
+        level rather than implicit in the subtype catalogue.
+        """
+        return (self.category, self.event_subtype, self.pair, self.severity)
 
 
 __all__ = [

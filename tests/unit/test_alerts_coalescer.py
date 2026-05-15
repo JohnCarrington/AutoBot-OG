@@ -266,3 +266,177 @@ def test_one_second_short_of_window_does_not_flush() -> None:
     box[0] = _NOW0 + timedelta(seconds=29)
     batches = c.tick()
     assert batches == []
+
+
+# ---------------------------------------------------------------------------
+# Coalesce-key includes severity (M1, Phase 9 review)
+# ---------------------------------------------------------------------------
+
+
+def test_same_subtype_different_severity_does_not_coalesce() -> None:
+    """M1: two alerts with same (category, subtype, pair) but
+    different severity occupy distinct pending groups."""
+    box = [_NOW0]
+    c = _coalescer(box)
+    c.add(_alert(severity=AlertSeverity.INFO, short_text="info"))
+    box[0] = _NOW0 + timedelta(seconds=10)
+    c.add(_alert(severity=AlertSeverity.WARNING, short_text="warn"))
+    # Two distinct pending groups, not one.
+    assert c.pending_count == 2
+
+
+def test_critical_flushes_same_prefix_pending_across_severities() -> None:
+    """M1 × CRITICAL bypass: severity is part of the full coalesce
+    key, but the CRITICAL bypass flushes any pending group sharing
+    the (category, subtype, pair) prefix — not just the exact key.
+    Without this, a contrived burst of WARNING + CRITICAL of the
+    same subtype would ship CRITICAL first and leave the WARNING
+    pending until window expiry, reordering the operator's view."""
+    box = [_NOW0]
+    c = _coalescer(box, window=30)
+    c.add(_alert(severity=AlertSeverity.WARNING,
+                 event_subtype="FEED_STALE",
+                 category=AlertCategory.SYSTEM, pair=None,
+                 short_text="warn 1"))
+    box[0] = _NOW0 + timedelta(seconds=5)
+    c.add(_alert(severity=AlertSeverity.WARNING,
+                 event_subtype="FEED_STALE",
+                 category=AlertCategory.SYSTEM, pair=None,
+                 short_text="warn 2"))
+    box[0] = _NOW0 + timedelta(seconds=10)
+    batches = c.add(_alert(severity=AlertSeverity.CRITICAL,
+                           event_subtype="FEED_STALE",
+                           category=AlertCategory.SYSTEM, pair=None,
+                           short_text="crit"))
+    # WARNING pair (one batch of two alerts) flushes ahead of CRITICAL.
+    assert len(batches) == 2
+    assert [a.short_text for a in batches[0]] == ["warn 1", "warn 2"]
+    assert batches[1][0].severity is AlertSeverity.CRITICAL
+    assert c.pending_count == 0
+
+
+def test_critical_does_not_flush_unrelated_subtype_pending() -> None:
+    """Sanity: prefix matching is on (category, subtype, pair) — a
+    CRITICAL of a DIFFERENT subtype must not sweep an unrelated
+    pending group. (Other-subtype groups still ship via
+    _flush_elapsed when their own window expires.)"""
+    box = [_NOW0]
+    c = _coalescer(box, window=30)
+    c.add(_alert(severity=AlertSeverity.WARNING,
+                 event_subtype="FEED_STALE",
+                 category=AlertCategory.SYSTEM, pair=None,
+                 short_text="other"))
+    box[0] = _NOW0 + timedelta(seconds=5)
+    batches = c.add(_alert(severity=AlertSeverity.CRITICAL,
+                           event_subtype="FAILURE_THRESHOLD_TRIPPED",
+                           category=AlertCategory.SYSTEM, pair=None,
+                           short_text="crit"))
+    # Only the CRITICAL ships; the unrelated FEED_STALE stays pending.
+    assert len(batches) == 1
+    assert batches[0][0].severity is AlertSeverity.CRITICAL
+    assert c.pending_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Clock-backwards defence (M2, Phase 9 review)
+# ---------------------------------------------------------------------------
+
+
+def test_clock_backwards_treated_as_elapsed_flushes_pending() -> None:
+    """M2: NTP correction / clock-jump backwards must NOT silently
+    bury pending alerts. _flush_elapsed treats negative elapsed as
+    expired so the group ships immediately instead of waiting for
+    the wall clock to catch up."""
+    box = [_NOW0]
+    c = _coalescer(box, window=30)
+    c.add(_alert())
+    assert c.pending_count == 1
+    # Jump the clock backwards by 5 minutes.
+    box[0] = _NOW0 - timedelta(minutes=5)
+    batches = c.tick()
+    assert len(batches) == 1
+    assert c.pending_count == 0
+
+
+def test_clock_backwards_flushes_via_add_for_other_key() -> None:
+    """Sanity: the backwards-clock check inside _flush_elapsed also
+    fires from add() (which calls _flush_elapsed for every other
+    key before processing the new alert)."""
+    box = [_NOW0]
+    c = _coalescer(box, window=30)
+    c.add(_alert(pair="GBPUSD"))
+    box[0] = _NOW0 - timedelta(minutes=5)
+    batches = c.add(_alert(pair="EURUSD"))
+    # GBPUSD flushed because elapsed is negative.
+    assert len(batches) == 1
+    assert batches[0][0].pair == "GBPUSD"
+    assert c.pending_count == 1  # EURUSD now pending
+
+
+# ---------------------------------------------------------------------------
+# CRITICAL after same-key window elapsed (M4, Phase 9 review)
+# ---------------------------------------------------------------------------
+
+
+def test_critical_arriving_after_same_key_window_elapsed() -> None:
+    """M4: when a CRITICAL arrives for the same key as a pending
+    non-CRITICAL group whose window has ALREADY elapsed, the
+    elapsed group should flush as its own batch (via the
+    _flush_elapsed sweep at the top of add) BEFORE the CRITICAL
+    is delivered — not be subsumed into the CRITICAL's same-prefix
+    flush, which finds no remaining pending entries.
+
+    Expected: two batches, in order: [elapsed non-CRITICAL] and
+    [CRITICAL]. The CRITICAL branch's prefix sweep finds an empty
+    set of matching keys because _flush_elapsed already removed
+    the entry."""
+    box = [_NOW0]
+    c = _coalescer(box, window=30)
+    c.add(_alert(severity=AlertSeverity.WARNING, event_subtype="FEED_STALE",
+                 category=AlertCategory.SYSTEM, pair=None, short_text="warn"))
+    # Advance past the window so the pending group is elapsed.
+    box[0] = _NOW0 + timedelta(seconds=40)
+    batches = c.add(_alert(severity=AlertSeverity.CRITICAL,
+                           event_subtype="FEED_STALE",
+                           category=AlertCategory.SYSTEM, pair=None,
+                           short_text="crit"))
+    assert len(batches) == 2
+    # The elapsed non-CRITICAL goes first to preserve timeline ordering.
+    assert batches[0][0].severity is AlertSeverity.WARNING
+    assert batches[0][0].short_text == "warn"
+    # Then the CRITICAL alone.
+    assert len(batches[1]) == 1
+    assert batches[1][0].severity is AlertSeverity.CRITICAL
+    assert c.pending_count == 0
+
+
+# ---------------------------------------------------------------------------
+# close() and send-after-close guard (L5, Phase 9 review)
+# ---------------------------------------------------------------------------
+
+
+def test_close_marks_coalescer_closed() -> None:
+    c = _coalescer([_NOW0])
+    assert c.closed is False
+    c.close()
+    assert c.closed is True
+
+
+def test_close_is_idempotent() -> None:
+    c = _coalescer([_NOW0])
+    c.close()
+    c.close()  # must not raise
+    assert c.closed is True
+
+
+def test_close_does_not_drain_on_its_own() -> None:
+    """close() only sets the flag; draining is the alerter's job
+    (the alerter calls drain_all() first, then close())."""
+    box = [_NOW0]
+    c = _coalescer(box)
+    c.add(_alert())
+    c.close()
+    # Group is still in pending until drain_all is called.
+    assert c.pending_count == 1
+    batches = c.drain_all()
+    assert len(batches) == 1

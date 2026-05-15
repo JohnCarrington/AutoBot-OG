@@ -3,7 +3,7 @@
 Composition:
 
 - :py:class:`AlertCoalescer` — windowed grouping by
-  ``(category, event_subtype, pair)``.
+  ``(category, event_subtype, pair, severity)``.
 - :py:class:`AlertFormatter` — plain-text rendering with severity
   emoji + truncated bullet lists for big batches.
 - :py:class:`TelegramClient` — synchronous best-effort POST to the
@@ -58,6 +58,22 @@ from .types import Alert
 logger = logging.getLogger(__name__)
 
 
+_DELIVERY_LOG_MAX_LEN = 160  # truncate alert text in DEBUG success log
+
+
+def _truncate_for_log(text: str, max_len: int = _DELIVERY_LOG_MAX_LEN) -> str:
+    """Single-line, length-capped form of an alert body for log output.
+
+    Newlines collapse to ``\\n`` literal so a multi-bullet batch
+    summary still occupies one log line. Keeps grep across log
+    aggregators from breaking across records.
+    """
+    one_line = text.replace("\n", "\\n")
+    if len(one_line) <= max_len:
+        return one_line
+    return one_line[: max_len - 3] + "..."
+
+
 class TelegramAlerter:
     """Outbound Telegram notifier with coalescing.
 
@@ -107,7 +123,7 @@ class TelegramAlerter:
 
         if not self._enabled:
             logger.warning(
-                "TelegramAlerter: %s and/or %s missing — alerts will be "
+                "TelegramAlerter: %s and/or %s missing - alerts will be "
                 "no-op. Set both env vars to enable Telegram delivery.",
                 TELEGRAM_BOT_TOKEN_ENV,
                 TELEGRAM_CHAT_ID_ENV,
@@ -144,17 +160,34 @@ class TelegramAlerter:
     # ------------------------------------------------------------------
 
     def send(self, alert: Alert) -> None:
-        """Register ``alert``. Delivery is best-effort; never raises."""
+        """Register ``alert``. Delivery is best-effort; never raises.
+
+        L5 (Phase 9 review): if the alerter has already been
+        :py:meth:`close`-d, a late ``send()`` logs a WARNING and drops
+        the alert. The coalescer would otherwise buffer it into a
+        pending group that nothing ever flushes (BotLoop.stop has
+        already returned), and the alert would die silently with the
+        process.
+        """
         if not self._enabled or self._coalescer is None:
+            return
+        if self._coalescer.closed:
+            logger.warning(
+                "TelegramAlerter.send called after close - alert dropped "
+                "(kind=%s pair=%s severity=%s)",
+                alert.event_subtype,
+                alert.pair,
+                alert.severity.value,
+            )
             return
         try:
             batches = self._coalescer.add(alert)
         except Exception:
-            # The coalescer is pure-Python in-memory state — an
+            # The coalescer is pure-Python in-memory state - an
             # exception here is a programming bug, not a transient
             # condition. Log loudly and continue; do not propagate.
             logger.exception(
-                "AlertCoalescer.add raised — alert dropped (kind=%s pair=%s)",
+                "AlertCoalescer.add raised - alert dropped (kind=%s pair=%s)",
                 alert.event_subtype,
                 alert.pair,
             )
@@ -175,7 +208,7 @@ class TelegramAlerter:
         try:
             batches = self._coalescer.tick()
         except Exception:
-            logger.exception("AlertCoalescer.tick raised — pending state may be stale")
+            logger.exception("AlertCoalescer.tick raised - pending state may be stale")
             return
         for batch in batches:
             self._deliver(batch)
@@ -185,6 +218,12 @@ class TelegramAlerter:
 
         Called by :py:meth:`BotLoop.stop`. Telegram failures during
         the close drain are logged but never block shutdown.
+
+        L5 (Phase 9 review): also marks the coalescer closed so any
+        late :py:meth:`send` calls (e.g. from a worker that didn't
+        observe the shutdown signal in time) log a WARNING and drop
+        the alert instead of buffering into pending state that
+        nothing will flush.
         """
         if not self._enabled or self._coalescer is None:
             return
@@ -192,11 +231,15 @@ class TelegramAlerter:
             batches = self._coalescer.drain_all()
         except Exception:
             logger.exception(
-                "AlertCoalescer.drain_all raised — pending alerts may be lost"
+                "AlertCoalescer.drain_all raised - pending alerts may be lost"
             )
+            # Still mark closed so subsequent send() calls are
+            # rejected rather than silently buffered.
+            self._coalescer.close()
             return
         for batch in batches:
             self._deliver(batch)
+        self._coalescer.close()
 
     # ------------------------------------------------------------------
     # Internals
@@ -211,16 +254,29 @@ class TelegramAlerter:
             )
         except Exception:
             logger.exception(
-                "AlertFormatter.format_batch raised — batch dropped (n=%d)",
+                "AlertFormatter.format_batch raised - batch dropped (n=%d)",
                 len(batch),
             )
             return
         try:
-            self._client.send(text)
+            ok = self._client.send(text)
         except Exception:
             # TelegramClient.send already swallows; this is defense in
             # depth in case a future change makes it raise.
             logger.exception("TelegramClient.send raised unexpectedly")
+            return
+        if ok:
+            # L3 (Phase 9 review): operators reading DEBUG logs during
+            # incident response can correlate "did this alert ship?"
+            # without grep'ing for the absence of a WARNING. Truncated
+            # for log volume; the alerter's failure path already logs
+            # at WARNING when delivery fails, so the asymmetric levels
+            # match observability needs.
+            logger.debug(
+                "Telegram alert delivered (n=%d): %s",
+                len(batch),
+                _truncate_for_log(text),
+            )
 
 
 __all__ = ["TelegramAlerter"]

@@ -190,14 +190,48 @@ def test_close_is_safe_when_no_pending_alerts() -> None:
     assert rec.sent == []
 
 
-def test_send_during_close_path_does_not_raise() -> None:
-    """An alert arriving after close() still goes through the
-    coalescer (no special shutdown gate on the alerter)."""
+def test_send_after_close_is_rejected_and_does_not_raise(caplog) -> None:
+    """L5 (Phase 9 review): after close(), send() drops the alert
+    and logs a WARNING. The pre-L5 behaviour buffered the alert
+    into a pending group that nothing ever flushed — the alert
+    would die silently with the process. Now: explicit warn-and-drop."""
     a, rec = _enabled_alerter()
     a.close()
+    assert a.pending_count == 0  # close() drained
+    with caplog.at_level(logging.WARNING, logger="alerts.alerter"):
+        a.send(_alert())
+    # No exception; nothing was buffered or delivered.
+    assert a.pending_count == 0
+    assert rec.sent == []
+    # WARNING surfaced for the operator.
+    warns = [r for r in caplog.records
+             if r.levelno == logging.WARNING and "after close" in r.getMessage()]
+    assert len(warns) == 1
+
+
+def test_close_drains_then_marks_closed() -> None:
+    """L5: close() flushes pending alerts as usual AND sets the
+    closed flag — subsequent send() calls are then rejected."""
+    a, rec = _enabled_alerter()
+    a.send(_alert(short_text="pending"))
+    assert rec.sent == []  # buffered
+    a.close()
+    # The pending alert was delivered during the drain.
+    assert len(rec.sent) == 1
+    # And subsequent sends are now rejected.
+    a.send(_alert(short_text="post-close"))
+    # Still only one delivery.
+    assert len(rec.sent) == 1
+
+
+def test_close_is_idempotent_after_first_call() -> None:
+    """Calling close() twice should not raise or re-deliver."""
+    a, rec = _enabled_alerter()
     a.send(_alert())
-    # No exception; alert is now pending in the coalescer.
-    assert a.pending_count == 1
+    a.close()
+    delivered_after_first_close = len(rec.sent)
+    a.close()
+    assert len(rec.sent) == delivered_after_first_close
 
 
 # ---------------------------------------------------------------------------
@@ -248,3 +282,75 @@ def test_disabled_alerter_pending_count_is_zero(monkeypatch) -> None:
     a = TelegramAlerter()
     a.send(_alert())  # swallowed
     assert a.pending_count == 0
+
+
+# ---------------------------------------------------------------------------
+# DEBUG-level success log (L3, Phase 9 review)
+# ---------------------------------------------------------------------------
+
+
+def test_deliver_logs_debug_on_successful_send(caplog) -> None:
+    """L3: every successful send emits a DEBUG record with a
+    truncated alert body so operators reading DEBUG logs during
+    an incident can correlate "did the alert ship?"."""
+    a, rec = _enabled_alerter()
+    rec.return_value = True
+    with caplog.at_level(logging.DEBUG, logger="alerts.alerter"):
+        a.send(_alert(
+            severity=AlertSeverity.CRITICAL,
+            category=AlertCategory.SYSTEM,
+            event_subtype="FAILURE_THRESHOLD_TRIPPED",
+            pair=None,
+            full_text="threshold tripped",
+            short_text="tripped",
+        ))
+    debugs = [r for r in caplog.records if r.levelno == logging.DEBUG]
+    # At least one DEBUG record about delivery.
+    delivery_records = [r for r in debugs if "delivered" in r.getMessage()]
+    assert len(delivery_records) == 1
+    assert "FAILURE_THRESHOLD_TRIPPED" in delivery_records[0].getMessage()
+
+
+def test_deliver_does_not_log_debug_on_client_returning_false(caplog) -> None:
+    """When the client reports failure (returns False), the DEBUG
+    success log must NOT fire — the WARNING inside TelegramClient
+    is the operator-facing signal."""
+    a, rec = _enabled_alerter()
+    rec.return_value = False
+    with caplog.at_level(logging.DEBUG, logger="alerts.alerter"):
+        a.send(_alert(
+            severity=AlertSeverity.CRITICAL,
+            category=AlertCategory.SYSTEM,
+            event_subtype="FAILURE_THRESHOLD_TRIPPED",
+            pair=None,
+        ))
+    delivery_records = [
+        r for r in caplog.records
+        if r.levelno == logging.DEBUG and "delivered" in r.getMessage()
+    ]
+    assert delivery_records == []
+
+
+def test_deliver_debug_log_collapses_newlines_for_single_line(caplog) -> None:
+    """L3: Truncate-for-log replaces real newlines with ``\\n``
+    literals so a multi-bullet batch summary doesn't span multiple
+    log lines (which would break grep across log aggregators)."""
+    box = [_NOW0]
+    a, rec = _enabled_alerter(clock_box=box)
+    a.send(_alert(short_text="orphan A"))
+    box[0] = _NOW0 + timedelta(seconds=5)
+    a.send(_alert(short_text="orphan B"))
+    # Trigger flush via tick under caplog.
+    box[0] = _NOW0 + timedelta(seconds=40)
+    with caplog.at_level(logging.DEBUG, logger="alerts.alerter"):
+        a.tick()
+    delivery_records = [
+        r for r in caplog.records
+        if r.levelno == logging.DEBUG and "delivered" in r.getMessage()
+    ]
+    assert len(delivery_records) == 1
+    msg = delivery_records[0].getMessage()
+    # The original batch text contains real newlines (header + 2 bullets);
+    # the log line must not — the escape literal "\\n" appears instead.
+    assert "\n" not in msg
+    assert "\\n" in msg
