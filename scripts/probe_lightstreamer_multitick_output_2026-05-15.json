@@ -1,0 +1,1682 @@
+{
+  "probe_date": "2026-05-15",
+  "subscription": "CHART:CS.D.GBPUSD.TODAY.IP:5MINUTE",
+  "duration_seconds": 180,
+  "total_updates_received": 92,
+  "updates": [
+    {
+      "wall_clock_utc": "2026-05-15T12:25:21.207+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "17",
+        "CONS_TICK_COUNT": "17",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.3",
+        "BID_CLOSE": "13357.4",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.8",
+        "OFR_CLOSE": "13358.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:23.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "19",
+        "CONS_TICK_COUNT": "19",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.2",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:24.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "22",
+        "CONS_TICK_COUNT": "22",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.6",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359.1"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:25.030+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "24",
+        "CONS_TICK_COUNT": "24",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.5",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:26.029+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "25",
+        "CONS_TICK_COUNT": "25",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.4",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:28.021+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "26",
+        "CONS_TICK_COUNT": "26",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.3",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:30.020+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "28",
+        "CONS_TICK_COUNT": "28",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.2",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:31.022+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "29",
+        "CONS_TICK_COUNT": "29",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.3",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:33.029+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "31",
+        "CONS_TICK_COUNT": "31",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359.2"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:37.029+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "33",
+        "CONS_TICK_COUNT": "33",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359.2"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:42.020+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "34",
+        "CONS_TICK_COUNT": "34",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359.3"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:44.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "35",
+        "CONS_TICK_COUNT": "35",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359.2"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:45.021+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "36",
+        "CONS_TICK_COUNT": "36",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:46.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "37",
+        "CONS_TICK_COUNT": "37",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359.6"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:47.026+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "39",
+        "CONS_TICK_COUNT": "39",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13359",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:48.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "40",
+        "CONS_TICK_COUNT": "40",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:49.028+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "42",
+        "CONS_TICK_COUNT": "42",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:51.035+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "44",
+        "CONS_TICK_COUNT": "44",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13359",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:52.026+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "45",
+        "CONS_TICK_COUNT": "45",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13360.3"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:56.024+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "46",
+        "CONS_TICK_COUNT": "46",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13360.2"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:57.023+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "48",
+        "CONS_TICK_COUNT": "48",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13359"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:58.020+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "49",
+        "CONS_TICK_COUNT": "49",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:25:59.028+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "51",
+        "CONS_TICK_COUNT": "51",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.6"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:00.032+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "52",
+        "CONS_TICK_COUNT": "52",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:01.024+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "54",
+        "CONS_TICK_COUNT": "54",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:02.023+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "55",
+        "CONS_TICK_COUNT": "55",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:05.022+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "56",
+        "CONS_TICK_COUNT": "56",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.6"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:06.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "58",
+        "CONS_TICK_COUNT": "58",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:07.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "59",
+        "CONS_TICK_COUNT": "59",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.6",
+        "OFR_CLOSE": "13358.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:08.022+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "61",
+        "CONS_TICK_COUNT": "61",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.6",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13358.5"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:12.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "62",
+        "CONS_TICK_COUNT": "62",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13358.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:15.029+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "63",
+        "CONS_TICK_COUNT": "63",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13358.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:21.029+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "64",
+        "CONS_TICK_COUNT": "64",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13358.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:23.024+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "65",
+        "CONS_TICK_COUNT": "65",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13359"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:28.024+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "67",
+        "CONS_TICK_COUNT": "67",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13359"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:30.024+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "68",
+        "CONS_TICK_COUNT": "68",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.2",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13359.1"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:31.019+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "69",
+        "CONS_TICK_COUNT": "69",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13359"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:37.020+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "70",
+        "CONS_TICK_COUNT": "70",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13358.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:38.022+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "71",
+        "CONS_TICK_COUNT": "71",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13359"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:42.028+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "72",
+        "CONS_TICK_COUNT": "72",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13358.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:44.024+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "75",
+        "CONS_TICK_COUNT": "75",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13359"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:47.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "76",
+        "CONS_TICK_COUNT": "76",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.2",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13359.1"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:48.024+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "77",
+        "CONS_TICK_COUNT": "77",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13359"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:49.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "78",
+        "CONS_TICK_COUNT": "78",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13358.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:52.026+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "81",
+        "CONS_TICK_COUNT": "81",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13358.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:56.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "82",
+        "CONS_TICK_COUNT": "82",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13358",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.5",
+        "OFR_CLOSE": "13358.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:26:59.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "84",
+        "CONS_TICK_COUNT": "84",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.3",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358.2",
+        "OFR_CLOSE": "13358.2"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:00.031+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "86",
+        "CONS_TICK_COUNT": "86",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13357.1",
+        "BID_CLOSE": "13357.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13358",
+        "OFR_CLOSE": "13358"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:01.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "89",
+        "CONS_TICK_COUNT": "89",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13356.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13357.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:02.035+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "90",
+        "CONS_TICK_COUNT": "90",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13357",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13357.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:03.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "91",
+        "CONS_TICK_COUNT": "91",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13356.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13357.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:04.023+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "92",
+        "CONS_TICK_COUNT": "92",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13356.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13357.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:05.022+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "94",
+        "CONS_TICK_COUNT": "94",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13357.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13358"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:07.021+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "96",
+        "CONS_TICK_COUNT": "96",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13357.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13358"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:09.023+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "97",
+        "CONS_TICK_COUNT": "97",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13357",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13357.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:10.017+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "99",
+        "CONS_TICK_COUNT": "99",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13357",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13357.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:11.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "100",
+        "CONS_TICK_COUNT": "100",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13356.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13357.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:12.029+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "101",
+        "CONS_TICK_COUNT": "101",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13357",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13357.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:13.026+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "102",
+        "CONS_TICK_COUNT": "102",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.8",
+        "BID_CLOSE": "13356.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.7",
+        "OFR_CLOSE": "13357.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:16.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "103",
+        "CONS_TICK_COUNT": "103",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.7",
+        "BID_CLOSE": "13356.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.6",
+        "OFR_CLOSE": "13357.6"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:17.019+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "104",
+        "CONS_TICK_COUNT": "104",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.7",
+        "BID_CLOSE": "13356.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.6",
+        "OFR_CLOSE": "13357.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:18.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "106",
+        "CONS_TICK_COUNT": "106",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.7",
+        "BID_CLOSE": "13356.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.6",
+        "OFR_CLOSE": "13357.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:22.021+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "107",
+        "CONS_TICK_COUNT": "107",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13356.5",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.4"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:25.017+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "108",
+        "CONS_TICK_COUNT": "108",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13356.6",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.5"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:26.026+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "110",
+        "CONS_TICK_COUNT": "110",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13357",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:30.024+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "111",
+        "CONS_TICK_COUNT": "111",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13356.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:31.020+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "112",
+        "CONS_TICK_COUNT": "112",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13356.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:34.021+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "113",
+        "CONS_TICK_COUNT": "113",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13356.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:35.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "115",
+        "CONS_TICK_COUNT": "115",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13356.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:37.026+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "116",
+        "CONS_TICK_COUNT": "116",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13357",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:40.023+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "117",
+        "CONS_TICK_COUNT": "117",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13356.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:42.021+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "119",
+        "CONS_TICK_COUNT": "119",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13356.6",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.5"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:43.021+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "121",
+        "CONS_TICK_COUNT": "121",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13356.6",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.5"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:44.021+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "122",
+        "CONS_TICK_COUNT": "122",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13356.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:45.021+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "123",
+        "CONS_TICK_COUNT": "123",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.5",
+        "BID_CLOSE": "13357",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357.4",
+        "OFR_CLOSE": "13357.9"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:51.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "124",
+        "CONS_TICK_COUNT": "124",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.1",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:57.028+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "125",
+        "CONS_TICK_COUNT": "125",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357.6"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:58.026+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "126",
+        "CONS_TICK_COUNT": "126",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.5",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357.4"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:27:59.023+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "127",
+        "CONS_TICK_COUNT": "127",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.6",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357.5"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:00.028+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "128",
+        "CONS_TICK_COUNT": "128",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.5",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357.4"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:01.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "129",
+        "CONS_TICK_COUNT": "129",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.6",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357.5"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:02.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "131",
+        "CONS_TICK_COUNT": "131",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.6",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357.5"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:03.022+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "132",
+        "CONS_TICK_COUNT": "132",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357.6"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:05.022+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "133",
+        "CONS_TICK_COUNT": "133",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:07.031+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "135",
+        "CONS_TICK_COUNT": "135",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.4",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357.3"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:08.018+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "136",
+        "CONS_TICK_COUNT": "136",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13356.1",
+        "BID_CLOSE": "13356.2",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13357",
+        "OFR_CLOSE": "13357.1"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:11.022+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "138",
+        "CONS_TICK_COUNT": "138",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13355.8",
+        "BID_CLOSE": "13355.8",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13356.7",
+        "OFR_CLOSE": "13356.7"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:12.019+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "139",
+        "CONS_TICK_COUNT": "139",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13355.4",
+        "BID_CLOSE": "13355.4",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13356.3",
+        "OFR_CLOSE": "13356.3"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:13.025+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "140",
+        "CONS_TICK_COUNT": "140",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13355.4",
+        "BID_CLOSE": "13355.6",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13356.3",
+        "OFR_CLOSE": "13356.5"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:16.027+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "141",
+        "CONS_TICK_COUNT": "141",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13355.4",
+        "BID_CLOSE": "13355.7",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13356.3",
+        "OFR_CLOSE": "13356.6"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:18.024+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "142",
+        "CONS_TICK_COUNT": "142",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13355.4",
+        "BID_CLOSE": "13355.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13356.3",
+        "OFR_CLOSE": "13356.8"
+      },
+      "is_partial": false
+    },
+    {
+      "wall_clock_utc": "2026-05-15T12:28:19.018+00:00",
+      "fields": {
+        "UTM": "1778847900000",
+        "LTV": "144",
+        "CONS_TICK_COUNT": "144",
+        "CONS_END": "0",
+        "BID_OPEN": "13358.8",
+        "BID_HIGH": "13359.1",
+        "BID_LOW": "13355.4",
+        "BID_CLOSE": "13355.9",
+        "OFR_OPEN": "13360.3",
+        "OFR_HIGH": "13360.6",
+        "OFR_LOW": "13356.3",
+        "OFR_CLOSE": "13356.8"
+      },
+      "is_partial": false
+    }
+  ],
+  "analysis": {
+    "unique_utm_values": 1,
+    "utm_advance_pattern": "bar-aligned-only",
+    "cons_end_flips_observed": 0,
+    "bid_open_sample_values": [
+      "13358.8"
+    ],
+    "utm_repeats_within_bar_max": 92,
+    "consecutive_utm_differs_count": 0,
+    "consecutive_utm_same_count": 91
+  },
+  "ig_acc_type": "DEMO",
+  "ig_host": "https://demo-apd.marketdatasystems.com",
+  "subscription_confirmed": true,
+  "subscription_error_code": null,
+  "subscription_error_message": null,
+  "fatal_error": null,
+  "generated_at_utc": "2026-05-15T12:28:21.545401+00:00"
+}
