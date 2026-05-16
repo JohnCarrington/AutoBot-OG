@@ -23,6 +23,7 @@ from .constants import (
     WARNING_COOLDOWN_SEC,
     quantise_price,
 )
+from .hydration import load_latest_structure_state_per_pair
 from .types import AlertEvent, AlertEventKind, severity_for
 
 __all__ = [
@@ -32,6 +33,7 @@ __all__ = [
     "INFO_COOLDOWN_SEC",
     "STRUCTURE_ALERTS_LOG_PATH",
     "WARNING_COOLDOWN_SEC",
+    "load_latest_structure_state_per_pair",
     "quantise_price",
     "severity_for",
 ]
