@@ -315,3 +315,134 @@ The review prompt called out specific items. Each is checked below:
 The engine's spine is sound. Bias, mode, and 7 of the 8 strategy gate paths are implemented as agreed; the two HIGH issues are surgical fixes, not architectural rework. The test suite at 960/960 passes — the failure modes I called out are gaps in test coverage, not breakages of existing tests. The locked decisions on cadence, alongside-not-replace, regime-vs-mode separation, refinements A & B, and the 3-bar lookback are all implemented as designed.
 
 But: H-1 in particular is exactly the kind of "silent gate looks asymmetric" bug the strategy rewrites were meant to eliminate, and H-2 is exactly the kind of "the spec said cluster but the code counted something else" defect this review existed to find. Both must land before strategies start trading on this engine's output.
+
+---
+
+# Addendum — Session 2 re-review (2026-05-16)
+
+Fix commit `8172289` lands H-1, H-2, H-3. Verified against the original review's reproduction criteria. Test count: **966/966 passed** (was 960; +4 H-1 parametrized + 2 H-2 cases, matches the commit's "+6" claim).
+
+## H-1 verification — `liquidity_sweep` structure_mode gate
+
+- **Placement:** `src/strategies/liquidity_sweep.py:74` — after `is_valid` (line 67), before `_direction_from` (line 77). Matches the canonical ordering used by `bb_reclaim` (regime → is_valid → mode → direction) and `ema_continuation` (same). ✓
+- **Comment quality:** Lines 69–73 explain *why* — "VOLATILE regime without VOLATILE_SWEEP_ZONE mode means the H1 classifier called the macro state volatile but the engine doesn't see price near a liquidity pool right now". Good operator-facing rationale. ✓
+- **Parametrized test:** `test_liquidity_sweep_rejects_non_volatile_sweep_zone_mode` (`tests/unit/test_strategy_liquidity_sweep.py:189–227`).
+
+  Coverage: `["RANGE_BALANCE", "TREND_CONTINUATION", "TRANSITION", "UNKNOWN"]` — every non-matching value of `StructureMode` literal. ✓
+
+- **"Other gates set to passing" verification:** Traced the test's `StructureState` against every remaining gate:
+
+  | Gate | Test fixture value | Would pass with VOLATILE_SWEEP_ZONE? |
+  | --- | --- | --- |
+  | regime | `_state()` → "VOLATILE" | ✓ |
+  | is_valid | `True` | ✓ |
+  | reaction + htf + liquidity_below (`_direction_from`) | `SUPPORT_SWEEP_RECLAIM` + `BULLISH` + level present | ✓ → BULLISH |
+  | session (`source_ts` in London) | `_LONDON_NOW=12:00 UTC` | ✓ |
+  | nearest_support (`swept_level`) | level present | ✓ |
+  | `_sweep_extreme` (≥3 M5 bars, valid lows) | `_m5(ts=_LONDON_NOW)` provides 3 bars with `sweep_low=1.29900` | ✓ |
+  | atr_m5 > 0 | `0.0020` | ✓ |
+  | entry_price | base=1.30050 | ✓ |
+
+  **Conclusion:** When `structure_mode == "VOLATILE_SWEEP_ZONE"`, every other gate passes and a Signal would emit. The test therefore proves the new gate is the *sole* cause of rejection for each of the 4 wrong-mode inputs. ✓
+
+- **Minor doc drift (LOW):** The module docstring (lines 8–22) still lists the gates without mentioning `structure_mode == VOLATILE_SWEEP_ZONE`. The block was authoritative-looking before this fix; future readers may consult it instead of the function body. Recommend a one-line addition for symmetry with `bb_reclaim.py` / `ema_continuation.py`, neither of which lists the mode gate in their module docstrings either — so it's a pre-existing pattern, not a regression. **Not blocking.**
+
+## H-2 verification — equal-HL cluster count
+
+- **Code change:** `_mark_equal_hl_clusters` (`src/structure_engine/structure_state.py:355–370`) now reads `len(z.swing_strengths)` instead of unique source labels. The function is trivially correct given the invariant that `swing_strengths` accumulates one entry per member swing (verified below). ✓
+- **Comment quality:** Lines 361–366 explain the dedup quirk explicitly — "sources is deduped via `sorted(set(...))` in `merge_zones._merge_pair`, so three H1 swings clustering at one price collapse to a single 'swing_h1' source string — but the underlying `swing_strengths` list preserves one entry per member swing". Names the fix's anchor (`H-2 review fix 2026-05-16`) for future archaeology. ✓
+- **Invariant check — `swing_strengths` preservation:**
+
+  | Code path | Effect on `swing_strengths` |
+  | --- | --- |
+  | `make_zone(..., swing_strength=float)` (zone_builder.py:93–94) | appends one entry (unless `None`) |
+  | `_zones_from_swings` (structure_state.py:301–318) | always passes `s.strength` (a float) → 1 entry per swing |
+  | `_zones_from_session` (structure_state.py:321–352) | passes no `swing_strength` → list stays empty |
+  | `_merge_pair` (zone_builder.py:168) | `a.swing_strengths + b.swing_strengths` — preserved through merges |
+
+  Therefore session-only zones cannot be flagged as clusters (correct — session levels are not equal-HL clusters by definition), and N merged swing zones produce `len == N`. ✓
+
+- **Unit test:** `test_merged_zone_preserves_swing_strength_count` (test_zone_builder.py:95–114). Asserts both invariants: (a) `sources == ["swing_h1"]` (dedup occurred), (b) `len(swing_strengths) == 3`. This is the right level to test the underlying invariant. ✓
+- **End-to-end test — does it use real swings?** `test_equal_highs_cluster_flagged_as_liquidity` (test_analyze_structure.py:122–178):
+  - Builds 3 swing-high patterns at `1.30200`, spaced 6 M5 bars apart (centres 42, 48, 54).
+  - Each centre has 3 strictly-lower bars on either side (`(-3, 0.0005), (-2, 0.0010), (-1, 0.0015)` then peak then mirror).
+  - Pipes the resulting OHLC through `analyze_structure`, then asserts at least one `state.levels` entry has `level_type == "LIQUIDITY_HIGH"`.
+
+  **Traced through the engine:**
+  1. `detect_swings(df, "M5")` with `window=3` confirms peaks at indices 42, 48, 54 — each has 3 strictly-lower neighbours on both sides (verified arithmetic).
+  2. `_zones_from_swings` builds 3 `CandidateZone` HIGH-side entries, each at `price=1.30200` with `swing_strengths=[s.strength]` (len 1).
+  3. `merge_zones`: all 3 zones at the same price; merge threshold `ZONE_MERGE_MULT * (0.0004 + 0.0004) = 0.0008` ≫ 0 distance → all merge into one zone with `len(swing_strengths) == 3`.
+  4. `_mark_equal_hl_clusters`: `3 >= EQUAL_HL_MIN_COUNT(2)` → `is_equal_hl_cluster = True`.
+  5. `_wrap_levels`: HIGH-side cluster → `level_type = "LIQUIDITY_HIGH"`.
+
+  This is a genuine end-to-end test, not state injection. ✓
+
+  **Subtle but real:** the test would also fail if `detect_swings` were misconfigured or if `merge_zones` failed to combine same-price same-side zones. It exercises the full pipeline, so it's also a defence against regressions in those modules. Good design.
+
+## H-3 verification — MODULE.md priority documentation
+
+- **Section:** "Reaction priority on collision (H-3, 2026-05-16)" at MODULE.md:100–137. ✓
+- **Discoverability:** Sits in the "Design notes" block alongside the EMA degradation and regime-vs-mode sections. Same H-N anchor convention. An operator scanning MODULE.md from the top will encounter it before reaching "Deterministic by construction". ✓
+- **Content checklist:**
+  - **Priority order documented:** Yes — full 5-tier list at lines 122–129 (failed reclaim → acceptance break → sweep reclaim → rejection → inside-range). Matches the actual order in `reaction_detector.classify_reaction` (file lines 53–144). ✓
+  - **Rationale explained:** Yes — three numbered points (lines 110–120): "more specific continuation signal", "superset of acceptance shape", "spec §13 treats both as equivalent for EMA Continuation". ✓
+  - **Operator note on absent flags:** Lines 131–136 — "an absent acceptance-break flag does not mean the level wasn't broken — it may mean a more specific failed-reclaim won the tie". This is the practical guidance an ops engineer needs when reading jsonl logs. ✓
+- **No drift between MODULE.md and code:** Spot-checked that the documented order (failed_reclaim → acceptance → sweep → rejection → inside-range) is the order in `classify_reaction`. ✓
+
+## Potential new issues introduced by the fixes
+
+### 1. VOLATILE_SWEEP_ZONE gate rejecting valid setups during regime transitions
+
+**Risk:** Low. The mode classifier requires `near_liquidity` AND `atr_now > 1.5 × atr_median` to fire VOLATILE_SWEEP_ZONE. In a genuine sweep setup, both conditions almost certainly hold because the regime classifier itself uses elevated ATR to flag VOLATILE. The mode and regime decisions agree by construction in the common path.
+
+**The asymmetry that *could* cause friction:** `near_liquidity` is defined as "any liquidity zone exists above OR below" (M-3 in the main review, still deferred). If the swing detector hasn't yet identified a liquidity pool — e.g., during the first ~5 hours of live operation when only one side of structure has formed — the mode could be UNKNOWN or TRANSITION even while the regime engine sees VOLATILE. The gate would correctly reject in that case (not enough structure to anchor the sweep), but this is "correct" by intent, not a regression.
+
+**Conclusion:** Acceptable. The fix tightens the contract as designed by spec §13.
+
+### 2. swing_strengths count affecting other scoring paths
+
+Searched: only `_mark_equal_hl_clusters` reads `swing_strengths`. `score_zone` does not. `_merge_pair` is the only writer beyond `make_zone`. No other code path consumes the field. ✓ No side effects.
+
+**Note:** M-1 from the main review ("`swing.strength` value unused in scoring") is now *partially resolved* — the swing **count** is consumed via `swing_strengths`'s length. The strength **value** (the float itself) remains unused. The follow-up decision (wire strength into scoring, or drop the float) still stands but is less urgent.
+
+### 3. Other paths sensitive to the fix
+
+- **`_wrap_levels`** branches on `is_equal_hl_cluster` to assign `LIQUIDITY_HIGH`/`LIQUIDITY_LOW`. With H-2 fixed, **more** zones will now flag as clusters, so **more** zones will surface as liquidity levels in `state.levels`. Strategies that gate on `levels[*].level_type == "RESISTANCE"` would skip these. Audited: no strategy queries `state.levels` by `level_type`; they read `nearest_resistance`/`nearest_support`/`liquidity_above`/`liquidity_below` directly, all of which are computed independently. No regression risk.
+- **`liquidity.pick_liquidity_above` / `_below`** prefer `is_equal_hl_cluster=True` zones (liquidity.py:58). With H-2 fixed, the cluster tier will now actually populate. This means liquidity selection improves — exactly the intended effect of the fix. ✓
+
+## Test quality re-assessment
+
+| Concern | Status |
+| --- | --- |
+| H-1 parametrized test verifies the gate is the *only* cause of rejection | **Verified** — every other gate independently traced as passing. |
+| H-2 end-to-end test uses real OHLC, not hand-set state | **Verified** — synthetic candles flow through `detect_swings → merge_zones → _mark_equal_hl_clusters → _wrap_levels`. |
+| H-2 unit test pins the underlying invariant | **Verified** — `swing_strengths` count preservation through merge. |
+
+## Deferred items — re-assessment
+
+- **M-1 (swing.strength unused):** Partially closed by H-2 (count now used). Float value still unused. Severity drops to LOW.
+- **M-2 (recency non-deterministic):** Unchanged. Still LOW because the value remains unused.
+- **M-3 (`near_liquidity` is "exists anywhere"):** Unchanged. Now interacts more visibly with H-1 — see "Potential new issues" item 1. Still MEDIUM, still deferred OK.
+- **M-4 (acceptance-break requires directional body):** Unchanged. Still MEDIUM.
+- **M-5 (loose test):** Unchanged.
+- **M-6 (M15 derivation untested):** Unchanged. Still MEDIUM — this is the deferred item I'd most argue for promoting if a fast-follow window opens, because the M15 path is on every BAR_CLOSE.
+- **M-7 (no determinism test):** Unchanged.
+- **M-8/M-9/M-10:** Unchanged.
+- **Spec §8 `invalidation_penalty` unreachable:** Unchanged — still no code path sets `invalidated=True`. Decide-and-act in a follow-up.
+
+None of the deferred items should have been promoted to block-on-merge. The three HIGHs were the right cut.
+
+## Final recommendation
+
+### APPROVE FOR MERGE
+
+All three HIGH issues from the original review are fixed correctly:
+
+- **H-1** — gate present and parametrized-tested across all 4 wrong modes; trace confirms it's the sole rejection cause.
+- **H-2** — count fix correct; unit test pins the invariant; end-to-end test exercises the full pipeline with real swings.
+- **H-3** — MODULE.md section is thorough (priority order + rationale + operator note + anchor to fix date).
+
+966 tests pass, zero new warnings. No new defects introduced by the fixes. The deferred MEDIUM/LOW items remain follow-up tickets — none rise to block-on-merge given the engine's current usage pattern.
+
+**Merge recommendation:** `feature/structure-engine` is ready for merge into `develop`.
+
