@@ -26,6 +26,7 @@ from .constants import (
     SESSION_SCORE_LONDON,
     SESSION_SCORE_NY,
     SESSION_SCORE_PREV_DAY,
+    SWING_STRENGTH_WEIGHT,
     TIMEFRAME_SCORE,
     TOUCH_SCORE_1,
     TOUCH_SCORE_2,
@@ -60,9 +61,29 @@ def score_zone(zone: CandidateZone) -> tuple[float, dict[str, float]]:
         if zone.is_session_level and zone.session_kind is not None
         else 0.0
     )
+    # Swing strength contribution (M-1 review fix, 2026-05-16). Each
+    # member swing carries its own 0–1 strength score from
+    # ``swing_detector._compute_strength``; we take the max so a single
+    # very-strong swing in the cluster is what's remembered. Multiplied
+    # by ``SWING_STRENGTH_WEIGHT`` so the contribution is small relative
+    # to timeframe / touch / reaction.
+    swing_strength_component = (
+        max(zone.swing_strengths) * SWING_STRENGTH_WEIGHT
+        if zone.swing_strengths
+        else 0.0
+    )
     penalty = INVALIDATION_PENALTY if zone.invalidated else 0.0
 
-    raw = timeframe + touch + reaction + recency + liquidity + session - penalty
+    raw = (
+        timeframe
+        + touch
+        + reaction
+        + recency
+        + liquidity
+        + session
+        + swing_strength_component
+        - penalty
+    )
     capped = max(0.0, min(SCORE_CAP, raw))
 
     components = {
@@ -72,6 +93,7 @@ def score_zone(zone: CandidateZone) -> tuple[float, dict[str, float]]:
         "recency": float(recency),
         "liquidity": float(liquidity),
         "session": float(session),
+        "swing_strength": float(swing_strength_component),
         "penalty": float(-penalty),
     }
     return capped, components

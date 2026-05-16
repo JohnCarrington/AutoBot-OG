@@ -268,11 +268,30 @@ def _wick_ratio(*, type: str, i: int, highs, lows, opens, closes) -> float:
 
 
 def _recency(*, i: int, total_bars: int) -> float:
-    """Linear decay over the DataFrame's length. Latest bar scores ~1.0."""
+    """Decay by absolute distance from the latest bar.
+
+    Earlier code divided ``i`` by ``total_bars - 1``, which was non-deterministic
+    across buffer growth: a swing at fixed ``bar_index=50`` scored ``50/99``
+    in a 100-bar call and ``50/199`` in a 200-bar call (M-2 review fix,
+    2026-05-16).
+
+    The new formula uses *absolute* bars-from-the-right: a swing 10 bars
+    back scores the same whether the buffer holds 100 or 1000 bars. The
+    decay window is :data:`_RECENCY_DECAY_BARS`; older swings score 0.0.
+    """
     if total_bars <= 1:
         return 1.0
-    # Bars closer to the right edge score higher.
-    return i / (total_bars - 1)
+    distance = (total_bars - 1) - i
+    if distance <= 0:
+        return 1.0
+    if distance >= _RECENCY_DECAY_BARS:
+        return 0.0
+    return 1.0 - distance / _RECENCY_DECAY_BARS
+
+
+# Window over which post-swing recency decays from 1.0 to 0.0. Stays bounded
+# so adding more bars to the buffer never changes the score of a fixed swing.
+_RECENCY_DECAY_BARS: int = 60
 
 
 __all__ = ["detect_swings"]

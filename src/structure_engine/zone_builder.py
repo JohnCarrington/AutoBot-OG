@@ -53,6 +53,10 @@ class CandidateZone:
     session_kind: Optional[str] = None  # "prev_day" / "london" / "ny" / "asia"
     swing_strengths: list[float] = field(default_factory=list)
     debug: dict = field(default_factory=dict)
+    # Cached output of ``score_zone`` — populated on the first call by
+    # ``_score_with_cache`` to avoid recomputing the same zone up to 5×
+    # per analysis cycle (L-5 review fix, 2026-05-16).
+    _cached_score: Optional[tuple[float, dict]] = None
 
 
 def half_width_for(pair: str, atr_m5: float) -> float:

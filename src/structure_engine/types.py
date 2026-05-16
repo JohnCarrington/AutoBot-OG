@@ -19,6 +19,13 @@ from typing import Any, Literal, Optional
 
 Direction = Literal["BULLISH", "BEARISH", "NEUTRAL"]
 
+# Reaction direction notes (L-4 review fix, 2026-05-16):
+# - ``FAILED_RECLAIM_BELOW_SUPPORT``: price broke below support; the
+#   bullish retest reclaim attempt FAILED → bears continue down → bearish.
+# - ``FAILED_RECLAIM_ABOVE_RESISTANCE``: price broke above resistance;
+#   the bearish retest reclaim attempt FAILED → bulls continue up →
+#   bullish. The named direction in both cases is the *defender's*
+#   failed attempt, not the resulting move.
 ReactionType = Literal[
     "NONE",
     "SUPPORT_REJECTION",

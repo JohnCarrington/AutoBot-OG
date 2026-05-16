@@ -872,6 +872,53 @@ def test_h1_dataframe_includes_just_closed_h1_on_boundary(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# M15 — mirror of the H1 trim semantics (Phase 11)
+# ---------------------------------------------------------------------------
+
+
+def test_m15_dataframe_trims_partial_trailing_bar(monkeypatch) -> None:
+    """Off-boundary M5 close (minute % 15 != 0) trims the forming M15.
+
+    M-6 review fix (2026-05-16). At 13:05 the resample produces a 13:15
+    M15 bin with only 1 M5 contribution; ``_derive_and_enrich_m15`` must
+    drop it so the Structure Engine's M15 swing detector sees stable
+    per-M15-bar values.
+    """
+    bot, _ = _build(monkeypatch)
+    off_boundary = datetime(2026, 5, 15, 13, 5, tzinfo=timezone.utc)
+    df_m15 = bot._m15_for_test("GBPUSD", m5_close_time=off_boundary)  # type: ignore[attr-defined]
+    if not df_m15.empty:
+        # No forming 13:15 bar should appear; latest label must be
+        # strictly less than 13:15.
+        assert df_m15.index[-1] < datetime(
+            2026, 5, 15, 13, 15, tzinfo=timezone.utc,
+        )
+
+
+def test_m15_dataframe_keeps_just_closed_m15_on_boundary(monkeypatch) -> None:
+    """On a 13:15 M5 close (minute=15), the 13:15 M15 just closed — keep it."""
+    bot, _ = _build(monkeypatch)
+    on_boundary = datetime(2026, 5, 15, 13, 15, tzinfo=timezone.utc)
+    df_m15 = bot._m15_for_test("GBPUSD", m5_close_time=on_boundary)  # type: ignore[attr-defined]
+    assert not df_m15.empty
+
+
+def test_m15_dataframe_is_idempotent(monkeypatch) -> None:
+    """Same M5 buffer + close_time should produce equal M15 output.
+
+    Spec §17 rule #1 (determinism). The resample + indicator pipeline
+    is pure-functional; calling twice must yield identical values.
+    """
+    import pandas as pd
+
+    bot, _ = _build(monkeypatch)
+    close_time = datetime(2026, 5, 15, 13, 30, tzinfo=timezone.utc)
+    df_a = bot._m15_for_test("GBPUSD", m5_close_time=close_time)  # type: ignore[attr-defined]
+    df_b = bot._m15_for_test("GBPUSD", m5_close_time=close_time)  # type: ignore[attr-defined]
+    pd.testing.assert_frame_equal(df_a, df_b)
+
+
+# ---------------------------------------------------------------------------
 # H3 — force-close success counter resets
 # ---------------------------------------------------------------------------
 

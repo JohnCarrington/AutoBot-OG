@@ -766,11 +766,18 @@ class BotLoop:
         ``label="right"`` and ``closed="right"`` so each M15 bar is
         anchored on its close, matching the M5 buffer's convention.
 
-        Trim the trailing partial M15 unless the M5 close that
-        triggered this call lands exactly on a 15-minute boundary
-        (``minute % 15 == 0``). Same rationale as the H1 trim: an
-        in-progress bin recomputes on every M5 tick and the Structure
-        Engine's swing detector needs per-M15-bar stability.
+        **Trailing trim:** drop the trailing partial M15 unless the M5
+        close that triggered this call lands exactly on a 15-minute
+        boundary (``minute % 15 == 0``). Same rationale as the H1 trim:
+        an in-progress bin recomputes on every M5 tick and the
+        Structure Engine's swing detector needs per-M15-bar stability.
+
+        **Leading trim (M-9 review fix, 2026-05-16):** when the M5
+        buffer doesn't start on the leftmost edge of a 15-min window,
+        the first resample bin contains fewer than 3 M5 contributions.
+        That partial aggregate would contaminate the M15 indicator seed
+        values. Count the M5 contributions in the leftmost bin and trim
+        if < 3.
         """
         if df_m5.empty:
             return df_m5
@@ -785,8 +792,20 @@ class BotLoop:
         ).dropna()
         if agg.empty:
             return agg
+        # Trailing partial trim.
         if m5_close_time.minute % 15 != 0:
             agg = agg.iloc[:-1]
+        if agg.empty:
+            return agg
+        # Leading partial trim — count M5 bars in the leftmost M15 bin.
+        leftmost_label = agg.index[0]
+        bin_start = leftmost_label - pd.Timedelta(minutes=15)
+        # closed="right" → membership is (bin_start, leftmost_label]
+        leftmost_count = (
+            (df_m5.index > bin_start) & (df_m5.index <= leftmost_label)
+        ).sum()
+        if leftmost_count < 3:
+            agg = agg.iloc[1:]
         if agg.empty:
             return agg
         return self._apply_indicators(agg)

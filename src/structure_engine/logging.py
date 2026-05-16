@@ -25,6 +25,26 @@ _logger = logging.getLogger(__name__)
 _lock = threading.Lock()
 
 
+def _is_enabled() -> bool:
+    """Read the toggle at call time.
+
+    L-2 review fix (2026-05-16). Importing constants bound the env var
+    once at startup; reading per-call lets ops flip the flag on a
+    running process via env update. The module-level ``STRUCTURE_LOG_ENABLED``
+    is kept as the fallback so tests that monkeypatch the attribute
+    directly still work.
+    """
+    raw = os.getenv("STRUCTURE_LOG_ENABLED")
+    if raw is None:
+        return STRUCTURE_LOG_ENABLED
+    return raw.lower() in ("1", "true", "yes")
+
+
+def _log_path() -> str:
+    """Read the log path at call time (L-2 review fix)."""
+    return os.getenv("STRUCTURE_LOG_PATH", STRUCTURE_LOG_PATH)
+
+
 def log_structure_state(state: StructureState) -> None:
     """Append a one-line JSON record describing ``state``.
 
@@ -32,19 +52,19 @@ def log_structure_state(state: StructureState) -> None:
     errors are caught and logged via the standard logger — this writer
     must never crash the BAR_CLOSE pipeline.
     """
-    if not STRUCTURE_LOG_ENABLED:
+    if not _is_enabled():
         return
     payload = _to_payload(state)
     line = json.dumps(payload, separators=(",", ":"))
     try:
-        path = STRUCTURE_LOG_PATH
+        path = _log_path()
         os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
         with _lock:
             with open(path, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
     except OSError as exc:  # pragma: no cover — defensive
         _logger.warning(
-            "structure_engine: failed to write %s: %s", STRUCTURE_LOG_PATH, exc
+            "structure_engine: failed to write %s: %s", _log_path(), exc
         )
 
 

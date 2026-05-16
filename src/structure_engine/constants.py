@@ -99,6 +99,12 @@ SESSION_SCORE_NY: float = _f("STRUCTURE_SESSION_SCORE_NY", 1.0)
 
 INVALIDATION_PENALTY: float = _f("STRUCTURE_INVALIDATION_PENALTY", 2.0)
 
+# Weight applied to ``max(zone.swing_strengths)`` (M-1 review fix,
+# 2026-05-16). Small relative to the other components so a strong
+# cluster doesn't dwarf timeframe / touch / reaction signals. Raw
+# strength is 0.0–1.0; final contribution is 0.0–SWING_STRENGTH_WEIGHT.
+SWING_STRENGTH_WEIGHT: float = _f("STRUCTURE_SWING_STRENGTH_WEIGHT", 1.0)
+
 SCORE_CAP: float = _f("STRUCTURE_SCORE_CAP", 10.0)
 
 # Strategies gate on score >= STRONG_LEVEL_THRESHOLD (spec §8 interpretation).
@@ -122,6 +128,13 @@ EQUAL_HL_MIN_COUNT: int = _i("STRUCTURE_EQUAL_HL_MIN_COUNT", 2)
 # walks this list and picks the longest EMA whose value is not NaN.
 # ---------------------------------------------------------------------------
 BIAS_EMA_PRIORITY: tuple[str, ...] = ("ema_200", "ema_100", "ema_50")
+
+# Local bias (M5/M15) walks a shorter-EMA priority — the "local" half
+# of the htf/local distinction needs to read a shorter horizon than HTF
+# does. Without this, both biases land on ema_200 once warm-up completes,
+# collapsing the distinction to "different DataFrame" (M-10 review fix,
+# 2026-05-16).
+LOCAL_EMA_PRIORITY: tuple[str, ...] = ("ema_50", "ema_21", "ema_13")
 
 # MACD-histogram sign agreement with EMA stack and HH/HL structure. The
 # threshold is a small dead-zone so a near-zero histogram doesn't flip
@@ -156,6 +169,12 @@ MODE_TREND_SLOPE_MIN: float = _f("STRUCTURE_MODE_TREND_SLOPE_MIN", 0.35)
 MODE_VOLATILE_ATR_MULT: float = _f("STRUCTURE_MODE_VOLATILE_ATR_MULT", 1.5)
 MODE_VOLATILE_ATR_LOOKBACK: int = _i("STRUCTURE_MODE_VOLATILE_ATR_LOOKBACK", 50)
 
+# ``price_near_liquidity`` threshold — current price must be within this
+# many ATR of a liquidity zone's price for VOLATILE_SWEEP_ZONE to fire
+# (M-3 review fix, 2026-05-16). Matches the scale of the elevated-ATR
+# sibling check so the two mode preconditions are dimensionally consistent.
+NEAR_LIQUIDITY_ATR_MULT: float = _f("STRUCTURE_NEAR_LIQUIDITY_ATR_MULT", 2.0)
+
 
 # ---------------------------------------------------------------------------
 # Liquidity detection (spec §12).
@@ -182,6 +201,7 @@ STRUCTURE_LOG_PATH: str = os.getenv(
 __all__ = [
     "ACCEPTANCE_MIN_CLOSES",
     "BIAS_EMA_PRIORITY",
+    "LOCAL_EMA_PRIORITY",
     "BIAS_MACD_DEAD_ZONE",
     "BIAS_SWING_LOOKBACK",
     "DEFAULT_MIN_ZONE_PIPS",
@@ -198,6 +218,7 @@ __all__ = [
     "MODE_TREND_SLOPE_MIN",
     "MODE_VOLATILE_ATR_LOOKBACK",
     "MODE_VOLATILE_ATR_MULT",
+    "NEAR_LIQUIDITY_ATR_MULT",
     "PAIR_MIN_ZONE_PIPS",
     "REACTION_LOOKBACK_BARS",
     "REACTION_MEDIUM_ATR_MULT",
@@ -211,6 +232,7 @@ __all__ = [
     "RECENCY_SCORE_OLD",
     "RECENCY_SCORE_RECENT",
     "SCORE_CAP",
+    "SWING_STRENGTH_WEIGHT",
     "SESSION_SCORE_ASIA",
     "SESSION_SCORE_LONDON",
     "SESSION_SCORE_NY",

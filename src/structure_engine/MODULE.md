@@ -43,6 +43,25 @@ state: StructureState = analyze_structure(
 Strategies read `state.nearest_support`, `state.current_reaction`,
 `state.structure_mode`, etc. per the spec §13 gate matrix.
 
+## Locked design decisions
+
+Cross-referenced to the Phase 11 plan + adversarial review prompts (2026-05-16, L-6 review fix):
+
+| # | Decision | Where |
+|---|---|---|
+| 1 | H1 candles: derived from M5 via `df.resample("1h", label="right", closed="right")`, trim trailing partial. | `src/bot/loop.py:_derive_and_enrich_h1` |
+| 2 | M15 candles: derived from M5 via `"15min"` resample, trim trailing AND leading partial (M-9). | `src/bot/loop.py:_derive_and_enrich_m15` |
+| 3 | Phase 5 strategies replaced: read `StructureState`, apply §13 gates. No 3-bar pierce/reject/confirm in strategies. | `src/strategies/*.py` |
+| 4 | Reactions bar-close deterministic, **3-bar strict lookback** (N-2 / N-1 / N). No intrabar reads. | `reaction_detector.py` |
+| 5 | Regime label and `structure_mode` are independent. Strategies gate on both. | `mode_classifier.py` + spec §13 docstrings |
+| 6 | A level can carry **both** S/R and liquidity roles (HIGH-side equal-high cluster = `RESISTANCE` + `LIQUIDITY_HIGH`). | `_wrap_levels` + `pick_liquidity_*` |
+| 7 | Zone-merge weighted by timeframe score, not arithmetic mean. | `zone_builder._merge_pair` |
+| 8 | **Touch = any bar whose `[low, high]` range overlaps the zone band.** Wick counts. | `structure_state._accumulate_touches` |
+| 9 | EMA warm-up degradation (refinement A): HTF walks EMA200→100→50, local walks EMA50→21→13 (M-10). | `bias_detector._select_ema` |
+| 10 | Confidence one-sided guard (refinement B): single-side structure not penalised. | `structure_state._compute_confidence` |
+| 11 | Structure analysis runs on every BAR_CLOSE; signal gate suppresses *trades* only. | `src/bot/loop.py:_handle_bar_close` |
+| 12 | Failed-reclaim beats acceptance-break on 3-bar collision. | `reaction_detector.classify_reaction` |
+
 ## Design notes
 
 ### EMA warm-up degradation (refinement A, 2026-05-16)

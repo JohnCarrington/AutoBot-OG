@@ -93,15 +93,32 @@ def test_one_sided_structure_doesnt_crash_confidence(monkeypatch) -> None:
 
 
 def test_support_rejection_reaches_state() -> None:
-    """A SUPPORT_REJECTION pattern at the tail of M5 surfaces in state."""
-    warmup = warmup_rows(47, close=1.30050)
-    # Add a clear swing low at the warmup tail so a support zone exists
-    # around 1.30000 (matches reaction builder's support price).
-    warmup[40] = {
-        "open": 1.30000, "high": 1.30000 + 0.0003,
-        "low": 1.30000 - 0.0010, "close": 1.30000, "atr_14": 0.0010,
-    }
-    reaction_bars = build_support_rejection(1.30000)
+    """A SUPPORT_REJECTION pattern at the tail of M5 surfaces in state.
+
+    M-5 review fix (2026-05-16): the previous version accepted ``"NONE"``
+    as a pass, making the assertion trivially satisfied. The fixture is
+    now built so a proper M5 swing low forms at the support price (5-bar
+    fractal centred at index 40), so the support zone is reliably
+    discovered and the reaction must actually surface.
+    """
+    support_price = 1.30000
+    warmup = warmup_rows(47, close=support_price + 0.0010)
+    # Proper 5-bar M5 fractal centred at index 40: low at 40 strictly
+    # below the 3 neighbours on each side. Window for M5 is 3.
+    for i, (low, high) in enumerate(
+        [(0.0007, 0.0013), (0.0005, 0.0013), (0.0002, 0.0013),
+         (-0.0005, 0.0013),  # the swing low
+         (0.0002, 0.0013), (0.0005, 0.0013), (0.0007, 0.0013)],
+        start=37,
+    ):
+        warmup[i] = {
+            "open": support_price + 0.0010,
+            "close": support_price + 0.0010,
+            "high": support_price + high,
+            "low": support_price + low,
+            "atr_14": 0.0010,
+        }
+    reaction_bars = build_support_rejection(support_price)
     df_m5 = make_ohlc(warmup + reaction_bars)
     state = analyze_structure(
         pair=_PAIR,
@@ -111,11 +128,15 @@ def test_support_rejection_reaches_state() -> None:
         regime_state=_regime_state(),
     )
     assert state.is_valid is True
-    # The reaction should be one of the support-side outcomes. The exact
-    # value depends on the discovered zone; we accept rejection or a
-    # related support reaction.
+    # A support-side reaction must surface. "NONE" no longer accepted —
+    # this is the only end-to-end reaction test, weakening it would
+    # hide orchestrator regressions.
     assert state.current_reaction in (
-        "SUPPORT_REJECTION", "SUPPORT_SWEEP_RECLAIM", "NONE",
+        "SUPPORT_REJECTION", "SUPPORT_SWEEP_RECLAIM",
+    ), (
+        f"Expected a support reaction but got {state.current_reaction!r}. "
+        "Fix the fixture so the support zone is reliably discovered, "
+        "do not widen the assertion."
     )
 
 
@@ -176,6 +197,56 @@ def test_equal_highs_cluster_flagged_as_liquidity() -> None:
         "Expected at least one LIQUIDITY_HIGH zone after 3 swing-highs at "
         "matching price — equal-HL cluster detection regressed"
     )
+
+
+def test_analyze_structure_is_deterministic() -> None:
+    """M-7 review fix (2026-05-16). Spec §17 rule #1 and MODULE.md
+    "Deterministic by construction" promise: same candles in → same
+    StructureState out.
+
+    Builds a non-trivial fixture (warmup + reaction pattern), runs
+    ``analyze_structure`` twice on the same inputs, and asserts the
+    resulting StructureState is field-equal via ``dataclasses.asdict``.
+
+    Catches future regressions where someone introduces ``datetime.now()``
+    or a random tie-breaker.
+    """
+    import dataclasses
+
+    support_price = 1.30000
+    warmup = warmup_rows(47, close=support_price + 0.0010)
+    # 5-bar fractal centred at index 40 (matches the M-5 fixture).
+    for i, (low, high) in enumerate(
+        [(0.0007, 0.0013), (0.0005, 0.0013), (0.0002, 0.0013),
+         (-0.0005, 0.0013),
+         (0.0002, 0.0013), (0.0005, 0.0013), (0.0007, 0.0013)],
+        start=37,
+    ):
+        warmup[i] = {
+            "open": support_price + 0.0010,
+            "close": support_price + 0.0010,
+            "high": support_price + high,
+            "low": support_price + low,
+            "atr_14": 0.0010,
+        }
+    reaction_bars = build_support_rejection(support_price)
+    df_m5 = make_ohlc(warmup + reaction_bars)
+
+    state_a = analyze_structure(
+        pair=_PAIR,
+        candles_m5=df_m5,
+        candles_m15=pd.DataFrame(),
+        candles_h1=pd.DataFrame(),
+        regime_state=_regime_state(),
+    )
+    state_b = analyze_structure(
+        pair=_PAIR,
+        candles_m5=df_m5,
+        candles_m15=pd.DataFrame(),
+        candles_h1=pd.DataFrame(),
+        regime_state=_regime_state(),
+    )
+    assert dataclasses.asdict(state_a) == dataclasses.asdict(state_b)
 
 
 def test_debug_records_ema_used(monkeypatch) -> None:

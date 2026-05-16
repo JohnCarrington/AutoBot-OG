@@ -18,7 +18,12 @@ from typing import Optional
 
 import pandas as pd
 
-from .constants import BIAS_EMA_PRIORITY, BIAS_MACD_DEAD_ZONE, BIAS_SWING_LOOKBACK
+from .constants import (
+    BIAS_EMA_PRIORITY,
+    BIAS_MACD_DEAD_ZONE,
+    BIAS_SWING_LOOKBACK,
+    LOCAL_EMA_PRIORITY,
+)
 from .swing_detector import detect_swings
 from .types import Direction, Swing, Timeframe
 
@@ -95,7 +100,10 @@ def detect_local_bias(
     latest = df.iloc[-1]
     debug: dict = {"local_source": "M15" if df is df_m15 else "M5"}
 
-    ema_used, ema_value = _select_ema(latest)
+    # M-10 review fix (2026-05-16): local bias walks shorter EMAs
+    # (LOCAL_EMA_PRIORITY) so local/HTF distinction doesn't collapse to
+    # "different DataFrame" once long EMAs warm up.
+    ema_used, ema_value = _select_ema(latest, priority=LOCAL_EMA_PRIORITY)
     if ema_used is None or ema_value is None:
         debug["reason"] = "insufficient_ema_data"
         return "NEUTRAL", debug
@@ -123,12 +131,16 @@ def detect_local_bias(
     return price_signal, debug
 
 
-def _select_ema(row) -> tuple[Optional[str], Optional[float]]:
-    """Walk ``BIAS_EMA_PRIORITY`` and return the first non-NaN EMA.
+def _select_ema(
+    row, *, priority: tuple[str, ...] = BIAS_EMA_PRIORITY,
+) -> tuple[Optional[str], Optional[float]]:
+    """Walk ``priority`` and return the first non-NaN EMA.
 
-    Refinement A: graceful degradation through EMA200 → EMA100 → EMA50.
+    Refinement A graceful degradation: HTF uses ``BIAS_EMA_PRIORITY``
+    (EMA200 → EMA100 → EMA50); local uses ``LOCAL_EMA_PRIORITY``
+    (EMA50 → EMA21 → EMA13) per M-10.
     """
-    for col in BIAS_EMA_PRIORITY:
+    for col in priority:
         value = _safe_float(row.get(col)) if hasattr(row, "get") else float("nan")
         if not math.isnan(value):
             return col.upper().replace("EMA_", "EMA"), value

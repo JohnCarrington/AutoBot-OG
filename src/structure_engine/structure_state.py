@@ -26,17 +26,13 @@ from typing import Optional
 
 import pandas as pd
 
-from config.pair_config import pip_to_price
-
 from .bias_detector import detect_htf_bias, detect_local_bias
 from .constants import (
     EQUAL_HL_MIN_COUNT,
     MIN_CANDLES_H1,
     MIN_CANDLES_M15,
     MIN_CANDLES_M5,
-    PAIR_MIN_ZONE_PIPS,
-    DEFAULT_MIN_ZONE_PIPS,
-    RECENCY_BARS_RECENT,
+    NEAR_LIQUIDITY_ATR_MULT,
 )
 from .liquidity import pick_liquidity_above, pick_liquidity_below
 from .mode_classifier import classify_mode
@@ -166,12 +162,35 @@ def analyze_structure(
         nearest_resistance=nearest_resistance_zone,
     )
 
+    # M-5 review fix (2026-05-16): wire invalidation_penalty. An
+    # ACCEPTANCE_BREAK is by definition "the zone has been broken and
+    # accepted beyond" — the broken zone loses score on the next cycle.
+    # Re-wrap the affected level after marking so the score reflected
+    # in StructureState.nearest_* matches the penalty.
+    if reaction == "SUPPORT_ACCEPTANCE_BREAK" and nearest_support_zone is not None:
+        nearest_support_zone.invalidated = True
+        nearest_support_zone._cached_score = None  # invalidate cache
+        nearest_support = _zone_to_level(
+            pair_upper, nearest_support_zone, level_type="SUPPORT"
+        )
+    elif reaction == "RESISTANCE_ACCEPTANCE_BREAK" and nearest_resistance_zone is not None:
+        nearest_resistance_zone.invalidated = True
+        nearest_resistance_zone._cached_score = None  # invalidate cache
+        nearest_resistance = _zone_to_level(
+            pair_upper, nearest_resistance_zone, level_type="RESISTANCE"
+        )
+
     # 8. Bias.
     htf_bias, htf_debug = detect_htf_bias(candles_h1)
     local_bias, local_debug = detect_local_bias(candles_m5, candles_m15)
 
     # 9. Mode.
-    near_liquidity = liquidity_above_zone is not None or liquidity_below_zone is not None
+    near_liquidity = _price_near_liquidity(
+        current_price=current_price,
+        atr_m5=atr_m5,
+        liquidity_above_zone=liquidity_above_zone,
+        liquidity_below_zone=liquidity_below_zone,
+    )
     structure_mode, mode_reason = classify_mode(
         df_m5=candles_m5,
         df_h1=candles_h1,
@@ -434,10 +453,26 @@ def _accumulate_touches(
             zone.bars_since_last_touch = (total - 1) - last_idx
 
 
+def _score_with_cache(zone: CandidateZone) -> tuple[float, dict]:
+    """Memoised wrapper around :func:`score_zone`.
+
+    L-5 review fix (2026-05-16). The orchestrator scores each merged
+    zone via ``_wrap_levels`` and then re-scores it again per role
+    (nearest_support / nearest_resistance / liquidity_above /
+    liquidity_below) — up to 5× duplicate work per analysis cycle.
+    Caching on the mutable ``CandidateZone`` is safe because the
+    accumulation pipeline finishes (touches, sources, swing_strengths
+    all populated) before scoring starts.
+    """
+    if zone._cached_score is None:
+        zone._cached_score = score_zone(zone)
+    return zone._cached_score
+
+
 def _wrap_levels(zones: list[CandidateZone]) -> list[StructureLevel]:
     out: list[StructureLevel] = []
     for z in zones:
-        score, components = score_zone(z)
+        score, components = _score_with_cache(z)
         # Primary level_type: liquidity flag takes precedence for HIGH-side
         # equal-high clusters; LOW-side equal-low clusters surface as
         # LIQUIDITY_LOW. Otherwise SUPPORT/RESISTANCE by side. A level
@@ -493,7 +528,7 @@ def _nearest_zone(
 def _zone_to_level(
     pair: str, zone: CandidateZone, *, level_type: str
 ) -> StructureLevel:
-    score, components = score_zone(zone)
+    score, components = _score_with_cache(zone)
     return StructureLevel(
         pair=pair,
         level_type=level_type,  # type: ignore[arg-type]
@@ -531,6 +566,33 @@ def _compute_confidence(
     if resistance is not None:
         return resistance.score / 10.0
     return 0.0
+
+
+def _price_near_liquidity(
+    *,
+    current_price: float,
+    atr_m5: float,
+    liquidity_above_zone: Optional[CandidateZone],
+    liquidity_below_zone: Optional[CandidateZone],
+) -> bool:
+    """Return True when price sits within ``NEAR_LIQUIDITY_ATR_MULT`` ATR of
+    either liquidity pool.
+
+    M-3 review fix (2026-05-16). Previously checked existence only — once
+    the engine identified any liquidity zone (almost always), the flag was
+    True regardless of distance. The narrower definition aligns with the
+    spec §11 VOLATILE_SWEEP_ZONE wording ("price near obvious equal
+    highs/lows … liquidity pools close").
+    """
+    if math.isnan(current_price) or atr_m5 <= 0 or math.isnan(atr_m5):
+        return False
+    threshold = NEAR_LIQUIDITY_ATR_MULT * atr_m5
+    for zone in (liquidity_above_zone, liquidity_below_zone):
+        if zone is None:
+            continue
+        if abs(zone.price - current_price) <= threshold:
+            return True
+    return False
 
 
 def _summarise_reason(

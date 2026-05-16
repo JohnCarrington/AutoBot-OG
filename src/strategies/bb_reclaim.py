@@ -40,6 +40,7 @@ from config.pair_config import MIN_SL_PIPS, pip_size_for, price_to_pips
 from regime.labels import Direction, RegimeLabel
 from regime.state import RegimeState
 from structure_engine import StructureLevel, StructureState
+from structure_engine.constants import STRONG_LEVEL_THRESHOLD
 
 from .constants import (
     BB_RECLAIM_ATR_MULT,
@@ -50,8 +51,6 @@ from .signal import Signal, compute_invalid_after
 
 
 _STRATEGY_NAME = "bb_reclaim"
-
-_STRONG_LEVEL_THRESHOLD = 6.0
 
 _LONG_REACTIONS = frozenset({"SUPPORT_REJECTION", "SUPPORT_SWEEP_RECLAIM"})
 _SHORT_REACTIONS = frozenset({"RESISTANCE_REJECTION", "RESISTANCE_SWEEP_RECLAIM"})
@@ -165,13 +164,13 @@ def _direction_from_reaction(
     if reaction in _LONG_REACTIONS:
         if nearest_support is None:
             return None
-        if nearest_support.score < _STRONG_LEVEL_THRESHOLD:
+        if nearest_support.score < STRONG_LEVEL_THRESHOLD:
             return None
         return Direction.BULLISH
     if reaction in _SHORT_REACTIONS:
         if nearest_resistance is None:
             return None
-        if nearest_resistance.score < _STRONG_LEVEL_THRESHOLD:
+        if nearest_resistance.score < STRONG_LEVEL_THRESHOLD:
             return None
         return Direction.BEARISH
     return None

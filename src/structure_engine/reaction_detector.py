@@ -276,10 +276,12 @@ def _detect_support_acceptance_break(
             break
     if trailing < ACCEPTANCE_MIN_CLOSES:
         return None
-    # Bearish displacement on the confirmation bar.
-    conf_open = _safe_float(confirmation.get("open"))
-    if math.isnan(conf_open) or closes[-1] >= conf_open:
-        return None
+    # M-4 review fix (2026-05-16): the previous version also required
+    # a bearish body on the confirmation bar (``closes[-1] < conf_open``).
+    # Spec §10E describes acceptance as "N consecutive closes below the
+    # zone" with no requirement on the confirmation bar's body shape —
+    # the body check was missing valid acceptance breaks (e.g. small
+    # bullish pullback bar still below ``zone_low``). Dropped.
     return "SUPPORT_ACCEPTANCE_BREAK", "ACCEPTED_BELOW_SUPPORT"
 
 
@@ -304,9 +306,8 @@ def _detect_resistance_acceptance_break(
             break
     if trailing < ACCEPTANCE_MIN_CLOSES:
         return None
-    conf_open = _safe_float(confirmation.get("open"))
-    if math.isnan(conf_open) or closes[-1] <= conf_open:
-        return None
+    # Body requirement dropped per spec §10F (M-4 review fix, 2026-05-16).
+    # See _detect_support_acceptance_break for the rationale.
     return "RESISTANCE_ACCEPTANCE_BREAK", "ACCEPTED_ABOVE_RESISTANCE"
 
 
