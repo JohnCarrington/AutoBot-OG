@@ -7,30 +7,59 @@ the Phase 9 `TelegramAlerter` for delivery.
 
 ## Owns
 
-C-1 ships only the catalogue. Subsequent commits add modules:
+All eight modules shipped (C-1 through C-5), plus the C-6 BotLoop wiring:
 
-- `types.py` — `AlertEventKind` (closed catalogue of nine events) and
-  `AlertEvent` frozen dataclass. `severity_for()` is the locked
+- `types.py` (C-1) — `AlertEventKind` (closed catalogue of nine events)
+  and `AlertEvent` frozen dataclass. `severity_for()` is the locked
   kind→severity mapping.
-- `constants.py` — cooldown tunables (INFO 2h / WARNING 1h /
-  CRITICAL 30m), `STRUCTURE_ALERTS_LOG_PATH`,
-  `quantise_price()` (pip-integer quantisation for dedupe keys).
-- `diff.py` (C-2) — `compute_structure_diff(prev, curr)`.
-- `triggers.py` (C-2) — `changes_to_events(...)` mapping spec §7 A–H.
-- `dedupe.py` (C-3) — `DedupeCache` with severity-based cooldowns.
-- `persistence.py` (C-3) — append `AlertEvent` to
-  `data/alerts/structure_alerts.jsonl`.
+- `constants.py` (C-1) — cooldown tunables (INFO 2h / WARNING 1h /
+  CRITICAL 30m), `STRUCTURE_ALERTS_LOG_PATH`, `quantise_price()`
+  (pip-integer quantisation for dedupe keys).
+- `diff.py` (C-2) — `compute_structure_diff(prev, curr)`. Internal
+  `ChangeKind` enum + `StructureChange` tagged-union dataclass.
+- `triggers.py` (C-2) — `changes_to_events(changes, curr, *, now)`
+  mapping spec §7 A–H. Per-kind dedupe-key construction.
+- `dedupe.py` (C-3) — `DedupeCache` with severity-based cooldowns,
+  ask-and-record semantics, backwards-clock-skew handling.
+- `persistence.py` (C-3) — `append_event_to_jsonl(event, path)`
+  appending to `data/alerts/structure_alerts.jsonl`. OSError
+  swallowed + WARNING-logged. Always-on (no env toggle).
 - `hydration.py` (C-4) — `load_latest_structure_state_per_pair(path)`
   rehydrating from `data/structure/structure_state.jsonl` so the
-  `_previous_structure` cache survives restarts.
-- `summary.py` (C-5) — `build_hourly_summary(state)` per spec §11.
-- `alert_translator.py` (C-5) — Phase 12 `AlertEvent` →
-  Phase 9 `alerts.Alert`.
-- `processor.py` (C-5) — orchestrates diff → triggers → dedupe →
-  persistence and returns the events that survived dedupe.
-- BotLoop wiring (C-6) — `_previous_structure: dict[str, StructureState | None]`
-  and `_structure_dedupe: DedupeCache`, populated in `hydrate()` and
-  consulted in `_handle_bar_close`.
+  `_previous_structure` cache survives restarts. Refinement A reads
+  the `tf` field on compact level entries to thread timeframe back
+  into rehydrated nearest_support / nearest_resistance.
+- `summary.py` (C-5) — `build_hourly_summary(state, *, now)` per
+  spec §11.
+- `alert_translator.py` (C-5) — `translate_to_phase9_alert(event)`
+  Phase 12 `AlertEvent` → Phase 9 `alerts.Alert`.
+- `processor.py` (C-5) — `process_structure_alerts(*, prev, curr,
+  dedupe, now)` orchestrates diff → triggers → dedupe; returns
+  surviving events.
+
+C-6 BotLoop wiring (`src/bot/loop.py`):
+
+- `BotLoop.__init__` constructs `self._previous_structure: dict[str,
+  Optional[StructureState]] = {}` and `self._structure_dedupe: DedupeCache`.
+- `BotLoop.hydrate()` calls `load_latest_structure_state_per_pair`
+  via the `STRUCTURE_LOG_PATH` env var and merges the result into
+  `_previous_structure`. Hydration failure degrades gracefully to
+  cold-start; never blocks startup.
+- `BotLoop._handle_bar_close` calls `_dispatch_structure_alerts`
+  AFTER `log_structure_state(structure_state)` and BEFORE the
+  periodic-tasks block. The helper:
+  1. Runs `process_structure_alerts(prev, curr, dedupe, now)`.
+  2. Dispatches surviving events via `translate_to_phase9_alert`
+     + `self._alerter.send`.
+  3. Appends each event to the audit jsonl.
+  4. At `candle.close_time.minute == 0`, builds an
+     `HOURLY_SUMMARY` event, runs it through the same dedupe gate,
+     and dispatches + persists via the same pathway.
+  5. Updates `self._previous_structure[pair] = structure_state`.
+- Exception handling is failure-isolated at every layer: a structure-
+  alerts crash logs and clears the per-bar event list, but never
+  blocks the BAR_CLOSE pipeline (signal generation, SL evaluation,
+  reconciliation all keep running).
 
 ## Event catalogue
 
