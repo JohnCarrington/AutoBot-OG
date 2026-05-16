@@ -11,9 +11,9 @@ Wants=network-online.target
 Type=simple
 User=autobot
 Group=autobot
-WorkingDirectory=/opt/autobot-og
-EnvironmentFile=/opt/autobot-og/.env
-ExecStart=/opt/autobot-og/.venv/bin/python -m bot.main
+WorkingDirectory=/home/autobot/autobot-og
+EnvironmentFile=/home/autobot/autobot-og/.env
+ExecStart=/home/autobot/autobot-og/.venv/bin/python -m bot.main
 # Restart=no is a deliberate v1 decision — automatic restart would
 # mask the FAILURE_THRESHOLD_TRIPPED CRITICAL Telegram alert. The
 # operator inspects the alert + journalctl and decides whether to
