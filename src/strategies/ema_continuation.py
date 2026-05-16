@@ -1,40 +1,32 @@
-"""EMA Continuation strategy (TREND regime).
+"""EMA Continuation strategy (TREND regime) — Phase 11 rewrite.
 
-See ``docs/v1_architecture.md`` §5.2. Stateless 3-bar inspection.
+The strategy reads :class:`StructureState` and applies the spec §13
+EMA-Continuation gates. The old "wick-touches-EMA50 + reclaim + bullish-
+bodied confirmation" 3-bar pattern is gone; the Structure Engine's
+``current_reaction`` (acceptance break / failed reclaim) plus
+``structure_mode == TREND_CONTINUATION`` carry the same intent.
 
-Pattern (LONG bullish TREND; SHORT bearish TREND mirrors)
----------------------------------------------------------
-1. **Pullback** — ``pullback.low <= ema_50`` (wick-penetrates EMA50)
-   AND ``pullback.close >= ema_50 - EMA_PULLBACK_CLOSE_TOLERANCE_PIPS``
-   (close may sit slightly past, controlled by env tunable).
-2. **Reclaim** — ``reclaim.close > ema_50``.
-3. **Confirmation** — bullish-bodied bar that closes above the reclaim
-   and above EMA50: ``confirmation.close > reclaim.close``,
-   ``confirmation.close > confirmation.ema_50``,
-   ``confirmation.close > confirmation.open``.
+Gates (spec §13)
+----------------
+SELL:
+    - ``regime == TREND`` (dispatcher enforces)
+    - ``htf_bias == BEARISH``
+    - ``structure_mode == TREND_CONTINUATION``
+    - ``current_reaction in (FAILED_RECLAIM_BELOW_SUPPORT,
+      SUPPORT_ACCEPTANCE_BREAK)``
 
-Plus a structure cross-check: ``get_structure_state(df_m5).recent_pattern``
-must agree with the TREND direction (HH/HL for bullish, LH/LL for
-bearish).
+BUY:
+    - ``regime == TREND``
+    - ``htf_bias == BULLISH``
+    - ``structure_mode == TREND_CONTINUATION``
+    - ``current_reaction in (FAILED_RECLAIM_ABOVE_RESISTANCE,
+      RESISTANCE_ACCEPTANCE_BREAK)``
 
-Spec interpretation (M1, review 2026-05-14)
--------------------------------------------
-Spec §5.2 wording reads "a counter-trend retrace of at least 2–3 M5
-bars". v1 inspects only the single ``df_m5.iloc[-3]`` bar as the
-pullback — bars further back are not re-validated as "still part of
-the retrace". The simplification is deliberate:
-
-- A 2-bar retrace where the *second* bar (`iloc[-3]`) wick-touches
-  EMA50 still qualifies under the v1 rule.
-- A 3+ bar retrace where the touch happened earlier than `iloc[-3]`
-  is missed; the spec's structure check (recent_pattern alignment)
-  partially compensates by requiring HH/HL (or LH/LL) over the
-  10-bar lookback window.
-
-v2 may relax to walk back N bars looking for the touch. Until then,
-the cleanest reading is: "the bar that triggers the setup is the
-one that touched EMA50". Setups where the touch is older than that
-are intentionally skipped.
+SL/TP
+-----
+SL anchors on the *broken* level's zone edge plus ATR padding. TP is
+``None`` — the execution layer uses its structure-trail exit, which
+is the right behaviour for trends (no fixed target).
 """
 from __future__ import annotations
 
@@ -47,105 +39,86 @@ import pandas as pd
 from config.pair_config import MIN_SL_PIPS, pip_size_for, price_to_pips
 from regime.labels import Direction, RegimeLabel
 from regime.state import RegimeState
-from structure import get_structure_state
+from structure_engine import StructureLevel, StructureState
 
 from .constants import (
     EMA_CONT_ATR_MULT,
     EMA_CONT_CONF_HIGH,
     EMA_CONT_CONF_LOW,
-    EMA_PULLBACK_CLOSE_TOLERANCE_PIPS,
 )
 from .signal import Signal, compute_invalid_after
 
 
 _STRATEGY_NAME = "ema_continuation"
 
-# Gate threshold from §5.2.
-_SLOPE_TREND_MIN = 0.35
-
-_BULLISH_PATTERNS = frozenset({"HH", "HL"})
-_BEARISH_PATTERNS = frozenset({"LH", "LL"})
+_BEARISH_REACTIONS = frozenset(
+    {"FAILED_RECLAIM_BELOW_SUPPORT", "SUPPORT_ACCEPTANCE_BREAK"}
+)
+_BULLISH_REACTIONS = frozenset(
+    {"FAILED_RECLAIM_ABOVE_RESISTANCE", "RESISTANCE_ACCEPTANCE_BREAK"}
+)
 
 
 def detect_ema_continuation(
     df_m5: pd.DataFrame,
     df_h1: pd.DataFrame,
     regime_state: RegimeState,
+    structure_state: StructureState,
     pair: str,
     current_time: datetime,  # noqa: ARG001 — kept for dispatcher uniformity
 ) -> Optional[Signal]:
-    """Return a Signal for a confirmed TREND continuation, else ``None``."""
+    """Return a Signal for a TREND continuation, else ``None``."""
     if regime_state.get("current_regime") != RegimeLabel.TREND.value:
         return None
-    direction_str = regime_state.get("current_direction")
-    if direction_str not in (Direction.BULLISH.value, Direction.BEARISH.value):
+    if not structure_state.is_valid:
         return None
-    direction = Direction(direction_str)
-
-    if len(df_m5) < 3 or len(df_h1) == 0:
+    if structure_state.structure_mode != "TREND_CONTINUATION":
         return None
 
-    h1 = df_h1.iloc[-1]
-    slope = _safe(h1, "ema_slope_norm_50_10")
-    if math.isnan(slope) or abs(slope) <= _SLOPE_TREND_MIN:
+    direction = _direction_from(structure_state)
+    if direction is None:
         return None
 
-    # Structure alignment — the structure module already considers swing
-    # confirmation lag in its own state, so we trust ``recent_pattern``
-    # directly.
-    structure = get_structure_state(df_m5)
-    recent_pattern = structure["recent_pattern"]
-    aligned_patterns = (
-        _BULLISH_PATTERNS
-        if direction == Direction.BULLISH
-        else _BEARISH_PATTERNS
-    )
-    if recent_pattern not in aligned_patterns:
-        return None
+    # The reaction's level is the one we broke / failed-to-reclaim.
+    if direction == Direction.BEARISH:
+        anchor_level = structure_state.nearest_support
+        if anchor_level is None:
+            return None
+        anchor_price = anchor_level.zone_high  # SL above the broken support
+    else:
+        anchor_level = structure_state.nearest_resistance
+        if anchor_level is None:
+            return None
+        anchor_price = anchor_level.zone_low
 
-    pullback, reclaim, confirmation = (
-        df_m5.iloc[-3],
-        df_m5.iloc[-2],
-        df_m5.iloc[-1],
-    )
-
-    if not _pattern_matches(direction, pullback, reclaim, confirmation, pair):
-        return None
-
-    atr_m5 = _safe(confirmation, "atr_14")
+    atr_m5 = _latest_atr(df_m5)
     if math.isnan(atr_m5) or atr_m5 <= 0:
         return None
 
-    anchor_price = (
-        float(pullback["low"])
-        if direction == Direction.BULLISH
-        else float(pullback["high"])
-    )
+    entry_price = _latest_close(df_m5)
+    if math.isnan(entry_price):
+        return None
+
     sl_price = _build_sl(
         direction=direction,
         anchor_price=anchor_price,
         atr_m5=atr_m5,
         pair=pair,
     )
-    confidence = _confidence(direction=direction, h1=h1)
-    source_ts = confirmation.name
-    if not isinstance(source_ts, datetime):
+    confidence = _confidence(direction=direction, df_h1=df_h1)
+    source_ts = _latest_timestamp(df_m5)
+    if source_ts is None:
         return None
 
     debug: dict[str, Any] = {
-        "slope_norm": float(slope),
+        "structure_mode": structure_state.structure_mode,
+        "current_reaction": structure_state.current_reaction,
+        "htf_bias": structure_state.htf_bias,
+        "local_bias": structure_state.local_bias,
+        "anchor_level_price": anchor_level.price,
+        "anchor_level_score": anchor_level.score,
         "atr_m5": float(atr_m5),
-        "recent_pattern": recent_pattern,
-        "pullback_low": float(pullback["low"]),
-        "pullback_high": float(pullback["high"]),
-        "pullback_close": float(pullback["close"]),
-        "pullback_ema_50": float(_safe(pullback, "ema_50")),
-        "reclaim_close": float(reclaim["close"]),
-        "reclaim_ema_50": float(_safe(reclaim, "ema_50")),
-        "confirmation_close": float(confirmation["close"]),
-        "confirmation_open": float(confirmation["open"]),
-        "anchor_price": anchor_price,
-        "macd_hist_h1": float(_safe(h1, "macd_hist_12_26_9")),
+        "structure_confidence": structure_state.confidence,
     }
 
     return Signal(
@@ -153,7 +126,7 @@ def detect_ema_continuation(
         direction=direction,
         regime=RegimeLabel.TREND,
         strategy_name=_STRATEGY_NAME,
-        suggested_entry_price=float(confirmation["close"]),
+        suggested_entry_price=entry_price,
         suggested_sl_price=sl_price,
         suggested_tp_price=None,
         confidence_score=confidence,
@@ -163,61 +136,13 @@ def detect_ema_continuation(
     )
 
 
-# --- Pattern helpers --------------------------------------------------------
-
-
-def _pattern_matches(
-    direction: Direction,
-    pullback: pd.Series,
-    reclaim: pd.Series,
-    confirmation: pd.Series,
-    pair: str,
-) -> bool:
-    """Apply the LONG / SHORT pattern test described in the module docstring."""
-    tol_price = EMA_PULLBACK_CLOSE_TOLERANCE_PIPS * pip_size_for(pair)
-
-    pullback_low = _safe(pullback, "low")
-    pullback_high = _safe(pullback, "high")
-    pullback_close = _safe(pullback, "close")
-    pullback_ema = _safe(pullback, "ema_50")
-    reclaim_close = _safe(reclaim, "close")
-    reclaim_ema = _safe(reclaim, "ema_50")
-    conf_open = _safe(confirmation, "open")
-    conf_close = _safe(confirmation, "close")
-    conf_ema = _safe(confirmation, "ema_50")
-
-    nans = [
-        pullback_low,
-        pullback_high,
-        pullback_close,
-        pullback_ema,
-        reclaim_close,
-        reclaim_ema,
-        conf_open,
-        conf_close,
-        conf_ema,
-    ]
-    if any(math.isnan(v) for v in nans):
-        return False
-
-    if direction == Direction.BULLISH:
-        return (
-            pullback_low <= pullback_ema
-            and pullback_close >= pullback_ema - tol_price
-            and reclaim_close > reclaim_ema
-            and conf_close > reclaim_close
-            and conf_close > conf_ema
-            and conf_close > conf_open
-        )
-    # BEARISH mirror
-    return (
-        pullback_high >= pullback_ema
-        and pullback_close <= pullback_ema + tol_price
-        and reclaim_close < reclaim_ema
-        and conf_close < reclaim_close
-        and conf_close < conf_ema
-        and conf_close < conf_open
-    )
+def _direction_from(state: StructureState) -> Optional[Direction]:
+    reaction = state.current_reaction
+    if state.htf_bias == "BEARISH" and reaction in _BEARISH_REACTIONS:
+        return Direction.BEARISH
+    if state.htf_bias == "BULLISH" and reaction in _BULLISH_REACTIONS:
+        return Direction.BULLISH
+    return None
 
 
 def _build_sl(
@@ -238,8 +163,10 @@ def _build_sl(
     )
 
 
-def _confidence(*, direction: Direction, h1: pd.Series) -> float:
-    hist = _safe(h1, "macd_hist_12_26_9")
+def _confidence(*, direction: Direction, df_h1: pd.DataFrame) -> float:
+    if df_h1 is None or df_h1.empty:
+        return EMA_CONT_CONF_LOW
+    hist = _safe_float(df_h1.iloc[-1].get("macd_hist_12_26_9"))
     if math.isnan(hist) or hist == 0.0:
         return EMA_CONT_CONF_LOW
     aligned = (hist > 0 and direction == Direction.BULLISH) or (
@@ -248,8 +175,26 @@ def _confidence(*, direction: Direction, h1: pd.Series) -> float:
     return EMA_CONT_CONF_HIGH if aligned else EMA_CONT_CONF_LOW
 
 
-def _safe(row: pd.Series, column: str) -> float:
-    value = row.get(column) if hasattr(row, "get") else None
+def _latest_atr(df: pd.DataFrame) -> float:
+    if df is None or df.empty or "atr_14" not in df.columns:
+        return float("nan")
+    return _safe_float(df["atr_14"].iloc[-1])
+
+
+def _latest_close(df: pd.DataFrame) -> float:
+    if df is None or df.empty or "close" not in df.columns:
+        return float("nan")
+    return _safe_float(df["close"].iloc[-1])
+
+
+def _latest_timestamp(df: pd.DataFrame) -> Optional[datetime]:
+    if df is None or df.empty:
+        return None
+    ts = df.index[-1]
+    return ts if isinstance(ts, datetime) else None
+
+
+def _safe_float(value) -> float:
     if value is None:
         return float("nan")
     try:
