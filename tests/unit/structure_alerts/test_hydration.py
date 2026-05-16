@@ -148,9 +148,17 @@ def test_nearest_without_match_falls_back_to_h1(tmp_path) -> None:
 
 def test_nearest_score_missing_defaults_to_zero(tmp_path) -> None:
     """Pre-refinement-A record (no nearest_*_score field) doesn't
-    crash; score defaults to 0. NEW_MAJOR_LEVEL won't fire for the
-    rehydrated nearest_* (below STRONG_LEVEL_THRESHOLD), which is
-    the conservative direction."""
+    crash; score defaults to 0.
+
+    Note: the "no spurious NEW_MAJOR_LEVEL on first post-upgrade bar"
+    invariant is enforced by ``compute_structure_diff`` including
+    ``prev.nearest_support`` / ``prev.nearest_resistance`` in
+    ``prev_keys`` (see H1 in the C-6 review and the
+    ``test_pre_refinement_a_record_does_not_spuriously_fire_new_major_level``
+    test in test_diff.py). The rehydrated score=0.0 default plays no
+    role in that protection — the diff-layer threshold check reads
+    curr's score, not prev's.
+    """
     path = tmp_path / "structure.jsonl"
     rec = _good_rec(
         "GBPUSD",

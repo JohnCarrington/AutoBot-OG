@@ -262,7 +262,18 @@ def compute_structure_diff(
     # §7 G: New major level. Scoped to curr.nearest_support /
     # nearest_resistance — those are the actionable levels. A new
     # level that's not one of the two nearest is observability-only.
+    #
+    # Also include prev.nearest_* in prev_keys: pre-refinement-A jsonl
+    # records (and any future record that loses the compact levels
+    # list) hydrate with empty prev.levels but populated prev.nearest_*.
+    # Without this, the first post-upgrade restart bar would treat
+    # every nearest as "new" and burst spurious INFO alerts.
     prev_keys = _level_key_set(curr.pair, prev.levels)
+    for prev_nearest in (prev.nearest_support, prev.nearest_resistance):
+        if prev_nearest is not None:
+            prev_keys.add(
+                (level_side(prev_nearest), quantise_price(curr.pair, prev_nearest.price))
+            )
     for nearest in (curr.nearest_support, curr.nearest_resistance):
         if nearest is None:
             continue

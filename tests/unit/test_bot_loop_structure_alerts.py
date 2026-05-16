@@ -221,13 +221,18 @@ def test_bar_after_bias_flip_produces_htf_bias_change_alert(monkeypatch) -> None
         a for a in alerter.sent
         if a.category.value == "STRUCTURE"
     ]
-    # At minimum HTF_BIAS_CHANGE fires (engine produces NEUTRAL bias
-    # from flat seed candles, prev was BEARISH → transition).
+    # Exactly HTF_BIAS_CHANGE fires (engine produces NEUTRAL bias
+    # from flat seed candles, prev was BEARISH → transition). Pinning
+    # the full subtype list (not `in`) is intentional: it surfaces any
+    # diff-layer regression that introduces an extra event on a bar
+    # whose seed is "empty levels, populated bias" — which is exactly
+    # the H1-shaped scenario (pre-refinement-A hydration) where a
+    # spurious NEW_MAJOR_LEVEL would otherwise slide through.
     subtypes = [a.event_subtype for a in structure_alerts]
-    assert "HTF_BIAS_CHANGE" in subtypes
-    htf_alert = next(
-        a for a in structure_alerts if a.event_subtype == "HTF_BIAS_CHANGE"
+    assert subtypes == ["HTF_BIAS_CHANGE"], (
+        f"Expected exactly one HTF_BIAS_CHANGE; got: {subtypes}"
     )
+    htf_alert = structure_alerts[0]
     assert htf_alert.severity.value == "WARNING"
     assert htf_alert.pair == "GBPUSD"
     # Dedupe-key injected into debug per the translator contract.
@@ -539,11 +544,16 @@ def test_structure_alert_persists_to_jsonl_audit_log(
 
     assert audit_path.exists()
     lines = audit_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) >= 1
     payloads = [json.loads(line) for line in lines]
-    kinds = {p["kind"] for p in payloads}
-    assert "HTF_BIAS_CHANGE" in kinds
-    assert "HOURLY_SUMMARY" in kinds
+    kinds = [p["kind"] for p in payloads]
+    # Exact set + count: a bias-flip + top-of-hour bar must produce
+    # exactly HTF_BIAS_CHANGE and HOURLY_SUMMARY in the audit log.
+    # Pinning the count (not `in` containment) means a future
+    # diff-layer regression that adds a spurious event on this
+    # seed (empty levels, populated bias) turns this test red.
+    assert sorted(kinds) == ["HOURLY_SUMMARY", "HTF_BIAS_CHANGE"], (
+        f"Expected exactly HTF_BIAS_CHANGE + HOURLY_SUMMARY; got: {kinds}"
+    )
 
 
 # ---------------------------------------------------------------------------

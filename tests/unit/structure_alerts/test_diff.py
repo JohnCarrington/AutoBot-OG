@@ -231,6 +231,36 @@ def test_new_level_scoped_to_nearest_only_not_all_levels() -> None:
     assert [c for c in changes if c.kind is ChangeKind.NEW_MAJOR_LEVEL] == []
 
 
+@pytest.mark.parametrize(
+    "nearest_field,level_type",
+    [
+        ("nearest_support", "SUPPORT"),
+        ("nearest_resistance", "RESISTANCE"),
+    ],
+)
+def test_pre_refinement_a_record_does_not_spuriously_fire_new_major_level(
+    nearest_field, level_type,
+) -> None:
+    # Pre-refinement-A jsonl records have empty levels list but the
+    # nearest_* fields are preserved through hydration. The diff layer
+    # must treat the rehydrated nearest_* as "present in prev" — without
+    # this, the first post-upgrade restart bar bursts spurious INFO
+    # NEW_MAJOR_LEVEL alerts for levels that were always there.
+    #
+    # H1 regression test: prev has empty levels but populated nearest_*,
+    # curr's nearest matches at the same quantised price. Expect no
+    # NEW_MAJOR_LEVEL (the level is not new from the operator's view).
+    prev_nearest = make_level(level_type=level_type, price=1.30050, score=0.0)
+    prev_kwargs = {nearest_field: prev_nearest, "levels": []}
+    prev = make_state(**prev_kwargs)
+    curr_nearest = make_level(level_type=level_type, price=1.30050, score=8.0)
+    curr_kwargs = {nearest_field: curr_nearest, "levels": [curr_nearest]}
+    curr = make_state(**curr_kwargs)
+    changes = compute_structure_diff(prev=prev, curr=curr)
+    nml = [c for c in changes if c.kind is ChangeKind.NEW_MAJOR_LEVEL]
+    assert nml == [], f"Spurious NEW_MAJOR_LEVEL fired: {nml}"
+
+
 # ---------------------------------------------------------------------------
 # §7 H — Level invalidated
 # ---------------------------------------------------------------------------
