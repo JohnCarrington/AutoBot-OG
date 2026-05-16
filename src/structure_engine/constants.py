@@ -197,6 +197,14 @@ STRUCTURE_LOG_PATH: str = os.getenv(
     "STRUCTURE_LOG_PATH", "data/structure/structure_state.jsonl"
 )
 
+# Phase 12 hydration support — cap on the compact ``levels`` list in
+# the jsonl payload (refinement A). Refer to
+# :mod:`structure_alerts.hydration` for the consumer. 30 is generous
+# given typical merged-zone counts of 10-20 per pair; raise this only
+# if production logs show top-of-tail truncation causing
+# LEVEL_INVALIDATED false positives at the alerts layer.
+STRUCTURE_LEVELS_MAX_PER_RECORD: int = _i("STRUCTURE_LEVELS_MAX_PER_RECORD", 30)
+
 
 __all__ = [
     "ACCEPTANCE_MIN_CLOSES",
@@ -238,6 +246,7 @@ __all__ = [
     "SESSION_SCORE_NY",
     "SESSION_SCORE_PREV_DAY",
     "STRONG_LEVEL_THRESHOLD",
+    "STRUCTURE_LEVELS_MAX_PER_RECORD",
     "STRUCTURE_LOG_ENABLED",
     "STRUCTURE_LOG_PATH",
     "SWING_WINDOW_H1",

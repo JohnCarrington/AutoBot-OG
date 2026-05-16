@@ -49,6 +49,7 @@ them to finish before tearing down the LS connection.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass
@@ -89,7 +90,19 @@ from risk.types import (
 from strategies.dispatcher import detect_all_setups
 from strategies.signal import Signal
 from structure import add_fractal_swings
+from structure_alerts import (
+    STRUCTURE_ALERTS_LOG_PATH,
+    AlertEvent,
+    DedupeCache,
+    append_event_to_jsonl,
+    build_hourly_summary,
+    load_latest_structure_state_per_pair,
+    process_structure_alerts,
+    translate_to_phase9_alert,
+)
 from structure_engine import analyze_structure, log_structure_state
+from structure_engine.constants import STRUCTURE_LOG_PATH as STRUCTURE_ENGINE_LOG_PATH
+from structure_engine.types import StructureState
 
 from .constants import (
     BOT_MAX_CONSECUTIVE_EVENT_FAILURES,
@@ -257,6 +270,17 @@ class BotLoop:
         # Shutdown signalling.
         self._shutdown_requested = threading.Event()
 
+        # Phase 12: structure-alerts state. Populated by hydrate() from
+        # data/structure/structure_state.jsonl so the first post-startup
+        # bar's diff has a non-None prev for any pair with history on
+        # disk. Each bar's _handle_bar_close updates the per-pair entry
+        # after running the diff. The DedupeCache is fresh per process
+        # — restart resets it; rehydrated prev prevents most spurious
+        # post-restart re-fires by ensuring the diff layer sees the
+        # same prev it did pre-restart.
+        self._previous_structure: dict[str, Optional[StructureState]] = {}
+        self._structure_dedupe: DedupeCache = DedupeCache()
+
         # Realized PnL ledger — v1 keeps a running counter; Phase 9+
         # will source from reconciliation events. Starts at 0.
         self._realized_pnl_today_r: float = 0.0
@@ -300,6 +324,34 @@ class BotLoop:
             raise RuntimeError(
                 f"Hydration failed for pairs: {list(report.failed_pairs)}"
             )
+
+        # Phase 12: rehydrate previous-bar structure state per pair.
+        # The structure engine jsonl path is independently env-overridable
+        # via STRUCTURE_LOG_PATH; we read at call time so a runtime env
+        # override is honoured (mirrors structure_engine.logging which
+        # also reads the env per call).
+        try:
+            structure_log_path = os.getenv(
+                "STRUCTURE_LOG_PATH", STRUCTURE_ENGINE_LOG_PATH,
+            )
+            hydrated = load_latest_structure_state_per_pair(structure_log_path)
+        except Exception:
+            # load_latest_structure_state_per_pair already swallows
+            # OSError and per-record errors internally — this catch is
+            # belt-and-braces for any unexpected raise. Hydration
+            # failure degrades gracefully to cold-start for every pair.
+            logger.exception(
+                "structure_alerts hydration failed — cold-start for all pairs",
+            )
+            hydrated = {}
+        if hydrated:
+            logger.info(
+                "structure_alerts: hydrated prev state for %d pair(s): %s",
+                len(hydrated),
+                sorted(hydrated.keys()),
+            )
+        self._previous_structure.update(hydrated)
+
         return {
             "cached_bars": sum(p.cached_bars for p in report.per_pair),
             "rest_bars": sum(p.rest_bars for p in report.per_pair),
@@ -628,6 +680,15 @@ class BotLoop:
             session_state=None,
         )
         log_structure_state(structure_state)
+
+        # Phase 12: structure-alerts pipeline. Runs after the engine
+        # produces the snapshot, before periodic tasks and the signal
+        # gate. Always-on (gap-fill bars included) — structure
+        # transitions during STALE / RESUMING windows are still
+        # operator-relevant observability. Failure-isolated: any
+        # exception inside the structure-alerts pipeline logs but
+        # never blocks BAR_CLOSE.
+        self._dispatch_structure_alerts(pair, candle, structure_state)
 
         # 2. Periodic tasks. Run before the signal gate so reconciliation
         #    and force-close fire during STALE / RESUMING windows where
@@ -1481,6 +1542,137 @@ class BotLoop:
             self._alerter.tick()
         except Exception:
             logger.exception("alerter.tick raised")
+
+    # ------------------------------------------------------------------
+    # Phase 12: structure alerts
+    # ------------------------------------------------------------------
+
+    def _dispatch_structure_alerts(
+        self,
+        pair: str,
+        candle,
+        structure_state: StructureState,
+    ) -> None:
+        """Run the Phase 12 structure-alerts pipeline for one bar.
+
+        Sequence:
+
+        1. ``process_structure_alerts(prev, curr, dedupe, now)`` —
+           diff → triggers → dedupe filter. Returns surviving events
+           in cause-then-effect order.
+        2. For each event: translate to a Phase 9 :class:`Alert` and
+           hand to :class:`TelegramAlerter`.
+        3. For each event: append to the structure-alerts audit jsonl.
+           Persistence is best-effort; failure logs but never blocks.
+        4. At top-of-hour M5 close (``candle.close_time.minute == 0``):
+           build the HOURLY_SUMMARY event, run through the same dedupe
+           gate (so a gap-fill replay of the same hour doesn't double-
+           fire), and dispatch + persist via the same pathway.
+        5. Update ``self._previous_structure[pair]`` so the next bar's
+           diff has the right ``prev`` to compare against.
+
+        Failure isolation: every layer of this method catches
+        ``Exception`` and logs. A structure-alerts crash never blocks
+        BAR_CLOSE (which would trip the event-failure counter for an
+        observability path).
+        """
+        try:
+            events = process_structure_alerts(
+                prev=self._previous_structure.get(pair),
+                curr=structure_state,
+                dedupe=self._structure_dedupe,
+                now=self._clock(),
+            )
+        except Exception:
+            logger.exception(
+                "structure_alerts processor failed for %s", pair,
+            )
+            events = []
+
+        # Dispatch every surviving event BEFORE persistence — operator
+        # paging takes priority over the audit log.
+        for event in events:
+            self._dispatch_structure_event(event)
+        for event in events:
+            try:
+                append_event_to_jsonl(event, STRUCTURE_ALERTS_LOG_PATH)
+            except Exception:
+                # append_event_to_jsonl already swallows OSError; this
+                # catches everything else (e.g. a TypeError on a
+                # non-JSON-encodable debug value that slipped past
+                # default=str). Persistence is observability — never
+                # block the bar-close pipeline.
+                logger.exception(
+                    "structure_alerts jsonl write failed (kind=%s pair=%s)",
+                    event.kind.value, event.pair,
+                )
+
+        # Top-of-hour hourly summary. Gate on bar minute, not wall
+        # clock, so a late-arriving 14:00 bar still produces the
+        # 14:00 summary.
+        if candle.close_time.minute == 0:
+            self._dispatch_hourly_summary(pair, structure_state)
+
+        self._previous_structure[pair] = structure_state
+
+    def _dispatch_hourly_summary(
+        self, pair: str, structure_state: StructureState,
+    ) -> None:
+        """Build + dispatch one HOURLY_SUMMARY for ``pair``.
+
+        Runs through the same :class:`DedupeCache` as the diff events
+        so a gap-fill replay (rare — same hour bar arriving twice)
+        is suppressed. The INFO 2h cooldown plus the per-hour bucket
+        in the dedupe key means a normal hourly cadence always fires.
+        """
+        try:
+            summary = build_hourly_summary(structure_state, now=self._clock())
+        except Exception:
+            logger.exception(
+                "build_hourly_summary failed for %s", pair,
+            )
+            return
+        if not self._structure_dedupe.should_fire(
+            summary.dedupe_key, summary.severity, now=self._clock(),
+        ):
+            return
+        self._dispatch_structure_event(summary)
+        try:
+            append_event_to_jsonl(summary, STRUCTURE_ALERTS_LOG_PATH)
+        except Exception:
+            logger.exception(
+                "structure_alerts hourly-summary jsonl write failed (%s)",
+                pair,
+            )
+
+    def _dispatch_structure_event(self, event: AlertEvent) -> None:
+        """Translate a Phase 12 :class:`AlertEvent` and ``send`` via
+        :class:`TelegramAlerter`.
+
+        No-op when ``self._alerter is None`` (matches the rest of the
+        codebase's alerter-optional contract). Exceptions inside the
+        translation / send path are caught and logged; the
+        structure-alerts pipeline keeps running for the rest of the
+        bar's events.
+
+        Uses :func:`translate_to_phase9_alert` without a clock
+        override so :attr:`Alert.timestamp` matches
+        :attr:`AlertEvent.timestamp` (the ``now`` passed to the
+        processor / summary builder). Every event from the same bar
+        thus carries the same timestamp — Telegram operator sees a
+        chronologically consistent cluster instead of a few
+        millisecond-shifted dispatch stamps.
+        """
+        if self._alerter is None:
+            return
+        try:
+            alert = translate_to_phase9_alert(event)
+            self._alerter.send(alert)
+        except Exception:
+            logger.exception(
+                "structure alert dispatch failed (kind=%s pair=%s)",
+                event.kind.value, event.pair,
+            )
 
     def _dispatch_reconciliation_alerts(
         self, outcome: ReconciliationOutcome,
