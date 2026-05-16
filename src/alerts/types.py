@@ -26,7 +26,21 @@ HEALTHCHECK_FAILED for shadow-mode and pre-market healthcheck):
   should not start trading until resolved), STARTUP_ABORTED
   (Phase 10 H1 layer 1 — refused to start because the runtime
   state would have made shadow_mode unsafe; e.g.,
-  shadow_mode=true with non-empty positions.json).
+  shadow_mode=true with non-empty positions.json),
+  SUPPORT_ACCEPTANCE_BREAK / RESISTANCE_ACCEPTANCE_BREAK (Phase 12
+  STRUCTURE category — price has accepted beyond a major level;
+  the structure-alerting dedupe cache still gates these so the
+  operator sees at most one CRITICAL per level per 30 minutes).
+
+Phase 12 (STRUCTURE category) adds nine event subtypes that surface
+structure-engine transitions to the operator. Severity assignment is
+locked in :mod:`structure_alerts.types` — every Phase 12 construction
+site reads through ``severity_for(kind)``. The two ACCEPTANCE_BREAK
+events are CRITICAL (locked level lost — material change to the
+trade thesis); HTF_BIAS_CHANGE / STRUCTURE_MODE_CHANGE / SWEEP_RECLAIM
+/ FAILED_RECLAIM are WARNING (operator-watchable transitions);
+NEW_MAJOR_LEVEL / LEVEL_INVALIDATED / HOURLY_SUMMARY are INFO
+(observability + passive heartbeat).
 
 CRITICAL is the only severity that bypasses coalescing — see
 :py:mod:`alerts.coalescer`. Reserving the immediate-send channel for
@@ -57,13 +71,15 @@ class AlertSeverity(Enum):
 
 
 class AlertCategory(Enum):
-    """Top-level grouping. Phase 9 ships three categories; v2 may add
-    more (e.g. ``RISK`` for circuit-breaker alerts that are currently
-    out of scope)."""
+    """Top-level grouping. Phase 9 shipped three categories; Phase 12
+    adds STRUCTURE for the structure-alerting layer. v2 may add more
+    (e.g. ``RISK`` for circuit-breaker alerts that are currently out
+    of scope)."""
 
     TRADE = "TRADE"
     RECONCILIATION = "RECONCILIATION"
     SYSTEM = "SYSTEM"
+    STRUCTURE = "STRUCTURE"
 
 
 # The closed set of event_subtype values Phase 9 emits. Kept as a
@@ -90,6 +106,19 @@ EVENT_SUBTYPES: tuple[str, ...] = (
     "HEALTHCHECK_FAILED",
     "STARTUP_ABORTED",
     "SHADOW_GUARD_BLOCKED",
+    # STRUCTURE (Phase 12) — kind→severity mapping is locked in
+    # :mod:`structure_alerts.types.severity_for`. Listed here in
+    # producer-order (spec §7 A–H + §11 heartbeat) so a future
+    # reader can scan the catalogue without cross-referencing.
+    "HTF_BIAS_CHANGE",
+    "STRUCTURE_MODE_CHANGE",
+    "SUPPORT_ACCEPTANCE_BREAK",
+    "RESISTANCE_ACCEPTANCE_BREAK",
+    "SWEEP_RECLAIM",
+    "FAILED_RECLAIM",
+    "NEW_MAJOR_LEVEL",
+    "LEVEL_INVALIDATED",
+    "HOURLY_SUMMARY",
 )
 
 

@@ -36,7 +36,13 @@ def test_severity_enum_values() -> None:
 
 
 def test_category_enum_values() -> None:
-    assert {c.value for c in AlertCategory} == {"TRADE", "RECONCILIATION", "SYSTEM"}
+    # Phase 12 adds STRUCTURE for the structure-alerting layer
+    # (HTF_BIAS_CHANGE, STRUCTURE_MODE_CHANGE, acceptance-breaks,
+    # sweep/failed reclaims, NEW_MAJOR_LEVEL, LEVEL_INVALIDATED,
+    # HOURLY_SUMMARY).
+    assert {c.value for c in AlertCategory} == {
+        "TRADE", "RECONCILIATION", "SYSTEM", "STRUCTURE",
+    }
 
 
 def test_event_subtypes_includes_locked_set() -> None:
@@ -48,6 +54,8 @@ def test_event_subtypes_includes_locked_set() -> None:
     #   SHADOW_MODE intercept in BotLoop._evaluate_and_execute).
     # - HEALTHCHECK_FAILED added in Phase 10 (pre-market healthcheck
     #   reported one or more hard failures).
+    # - The nine Phase 12 STRUCTURE subtypes — kind→severity mapping
+    #   is locked in :mod:`structure_alerts.types.severity_for`.
     expected = {
         "TRADE_OPENED", "TRADE_CLOSED", "AMEND_FAILED", "AMEND_PERSIST_FAILED",
         "SHADOW_TRADE",
@@ -56,6 +64,11 @@ def test_event_subtypes_includes_locked_set() -> None:
         "FAILURE_THRESHOLD_TRIPPED", "HEALTHCHECK_FAILED",
         # Phase 10 H1 layer 1 + 2 (Session-3 review):
         "STARTUP_ABORTED", "SHADOW_GUARD_BLOCKED",
+        # Phase 12 STRUCTURE (spec §7 A–H + §11 heartbeat):
+        "HTF_BIAS_CHANGE", "STRUCTURE_MODE_CHANGE",
+        "SUPPORT_ACCEPTANCE_BREAK", "RESISTANCE_ACCEPTANCE_BREAK",
+        "SWEEP_RECLAIM", "FAILED_RECLAIM",
+        "NEW_MAJOR_LEVEL", "LEVEL_INVALIDATED", "HOURLY_SUMMARY",
     }
     assert set(EVENT_SUBTYPES) == expected
 
