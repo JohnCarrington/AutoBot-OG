@@ -91,13 +91,13 @@ from strategies.dispatcher import detect_all_setups
 from strategies.signal import Signal
 from structure import add_fractal_swings
 from structure_alerts import (
-    STRUCTURE_ALERTS_LOG_PATH,
     AlertEvent,
     DedupeCache,
     append_event_to_jsonl,
     build_hourly_summary,
     load_latest_structure_state_per_pair,
     process_structure_alerts,
+    structure_alerts_log_path,
     translate_to_phase9_alert,
 )
 from structure_engine import analyze_structure, log_structure_state
@@ -330,6 +330,26 @@ class BotLoop:
         # via STRUCTURE_LOG_PATH; we read at call time so a runtime env
         # override is honoured (mirrors structure_engine.logging which
         # also reads the env per call).
+        #
+        # M2 (cleanup commit): gate on STRUCTURE_LOG_ENABLED. If logging
+        # is off this session, the engine writes nothing, so the jsonl
+        # on disk is stale (from a prior session, possibly hours/days
+        # old, possibly a different market regime). Diffing against
+        # stale prev would burst spurious WARNING events on the first
+        # bar. Cold-start is the safer fallback.
+        structure_log_enabled = os.getenv(
+            "STRUCTURE_LOG_ENABLED", "0",
+        ).lower() in ("1", "true", "yes")
+        if not structure_log_enabled:
+            logger.info(
+                "structure_alerts: STRUCTURE_LOG_ENABLED is off — "
+                "skipping hydration, cold-start for all pairs",
+            )
+            return {
+                "cached_bars": sum(p.cached_bars for p in report.per_pair),
+                "rest_bars": sum(p.rest_bars for p in report.per_pair),
+                "degraded_pairs": list(report.degraded_pairs),
+            }
         try:
             structure_log_path = os.getenv(
                 "STRUCTURE_LOG_PATH", STRUCTURE_ENGINE_LOG_PATH,
@@ -1575,13 +1595,25 @@ class BotLoop:
         ``Exception`` and logs. A structure-alerts crash never blocks
         BAR_CLOSE (which would trip the event-failure counter for an
         observability path).
+
+        M5 (cleanup commit): ``self._clock()`` is invoked exactly once
+        per bar and the captured value is threaded through every
+        downstream timestamp / dedupe-clock site (processor, summary
+        builder, summary dedupe gate). Without this, the summary's
+        dedupe-check ``now`` ran a few microseconds ahead of the
+        summary's own ``event.timestamp``, so two timestamps inside
+        one bar's pipeline read as different wall-clock values.
+        Production-visible impact is zero (hour-bucket dedupe key
+        derives from ``state.timestamp``, not ``now``), but the
+        locked decision was one shared ``now`` per bar.
         """
+        now = self._clock()
         try:
             events = process_structure_alerts(
                 prev=self._previous_structure.get(pair),
                 curr=structure_state,
                 dedupe=self._structure_dedupe,
-                now=self._clock(),
+                now=now,
             )
         except Exception:
             logger.exception(
@@ -1595,7 +1627,7 @@ class BotLoop:
             self._dispatch_structure_event(event)
         for event in events:
             try:
-                append_event_to_jsonl(event, STRUCTURE_ALERTS_LOG_PATH)
+                append_event_to_jsonl(event, structure_alerts_log_path())
             except Exception:
                 # append_event_to_jsonl already swallows OSError; this
                 # catches everything else (e.g. a TypeError on a
@@ -1611,12 +1643,12 @@ class BotLoop:
         # clock, so a late-arriving 14:00 bar still produces the
         # 14:00 summary.
         if candle.close_time.minute == 0:
-            self._dispatch_hourly_summary(pair, structure_state)
+            self._dispatch_hourly_summary(pair, structure_state, now=now)
 
         self._previous_structure[pair] = structure_state
 
     def _dispatch_hourly_summary(
-        self, pair: str, structure_state: StructureState,
+        self, pair: str, structure_state: StructureState, *, now: datetime,
     ) -> None:
         """Build + dispatch one HOURLY_SUMMARY for ``pair``.
 
@@ -1624,21 +1656,26 @@ class BotLoop:
         so a gap-fill replay (rare — same hour bar arriving twice)
         is suppressed. The INFO 2h cooldown plus the per-hour bucket
         in the dedupe key means a normal hourly cadence always fires.
+
+        ``now`` is the single bar-scoped wall-clock value captured by
+        the caller (:meth:`_dispatch_structure_alerts`). Threading it
+        through builder + dedupe-check keeps the whole bar's pipeline
+        on one timestamp (M5).
         """
         try:
-            summary = build_hourly_summary(structure_state, now=self._clock())
+            summary = build_hourly_summary(structure_state, now=now)
         except Exception:
             logger.exception(
                 "build_hourly_summary failed for %s", pair,
             )
             return
         if not self._structure_dedupe.should_fire(
-            summary.dedupe_key, summary.severity, now=self._clock(),
+            summary.dedupe_key, summary.severity, now=now,
         ):
             return
         self._dispatch_structure_event(summary)
         try:
-            append_event_to_jsonl(summary, STRUCTURE_ALERTS_LOG_PATH)
+            append_event_to_jsonl(summary, structure_alerts_log_path())
         except Exception:
             logger.exception(
                 "structure_alerts hourly-summary jsonl write failed (%s)",

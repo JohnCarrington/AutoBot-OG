@@ -145,10 +145,21 @@ def level_side(level: StructureLevel) -> str:
     a RESISTANCE at 1.30000 (rare but possible across separate zones)
     quantise to the same integer pip count but produce distinct
     dedupe keys.
+
+    L2 (cleanup commit): raises :class:`ValueError` on an unknown
+    ``level_type`` instead of silently falling through to RESISTANCE.
+    Engine ``LevelType`` is a closed ``Literal`` of four values today,
+    so the explicit branches are exhaustive; the raise catches a
+    future engine addition (e.g. ``DAILY_PIVOT``) at the trigger /
+    dedupe boundary in tests rather than letting it land on the
+    wrong side at runtime. Hydration's ``_VALID_LEVEL_TYPES`` already
+    fails-fast on the same axis.
     """
     if level.level_type in ("SUPPORT", "LIQUIDITY_LOW"):
         return "SUPPORT"
-    return "RESISTANCE"
+    if level.level_type in ("RESISTANCE", "LIQUIDITY_HIGH"):
+        return "RESISTANCE"
+    raise ValueError(f"Unknown level_type: {level.level_type!r}")
 
 
 def _level_key_set(

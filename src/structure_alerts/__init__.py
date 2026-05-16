@@ -23,6 +23,7 @@ from .constants import (
     STRUCTURE_ALERTS_LOG_PATH,
     WARNING_COOLDOWN_SEC,
     quantise_price,
+    structure_alerts_log_path,
 )
 from .dedupe import DedupeCache
 from .hydration import load_latest_structure_state_per_pair
@@ -45,5 +46,6 @@ __all__ = [
     "process_structure_alerts",
     "quantise_price",
     "severity_for",
+    "structure_alerts_log_path",
     "translate_to_phase9_alert",
 ]

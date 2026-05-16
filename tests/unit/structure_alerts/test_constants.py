@@ -77,6 +77,35 @@ def test_log_path_env_override(monkeypatch) -> None:
         importlib.reload(constants_mod)
 
 
+def test_structure_alerts_log_path_resolves_at_call_time(monkeypatch) -> None:
+    """M4: ``structure_alerts_log_path()`` reads the env per call, so an
+    operator override on a running process is honoured. Mirrors
+    :func:`structure_engine.logging._log_path` (Phase 11 L-2 fix).
+    Without per-call reads, the audit log silently keeps writing to
+    the import-time path despite the operator's reconfigure.
+    """
+    from structure_alerts.constants import structure_alerts_log_path
+
+    monkeypatch.delenv("STRUCTURE_ALERTS_LOG_PATH", raising=False)
+    default_path = structure_alerts_log_path()
+    # Default — falls back to the module-level constant (import-time
+    # capture). Asserting the default is data/alerts/... here pins
+    # that the fallback doesn't accidentally regress to "".
+    assert default_path == "data/alerts/structure_alerts.jsonl"
+
+    monkeypatch.setenv("STRUCTURE_ALERTS_LOG_PATH", "/tmp/runtime-a.jsonl")
+    assert structure_alerts_log_path() == "/tmp/runtime-a.jsonl"
+
+    # Operator changes the env again — same function picks up the
+    # new value without an import reload.
+    monkeypatch.setenv("STRUCTURE_ALERTS_LOG_PATH", "/tmp/runtime-b.jsonl")
+    assert structure_alerts_log_path() == "/tmp/runtime-b.jsonl"
+
+    # Env unset — falls back to the import-time captured value.
+    monkeypatch.delenv("STRUCTURE_ALERTS_LOG_PATH", raising=False)
+    assert structure_alerts_log_path() == default_path
+
+
 # ---------------------------------------------------------------------------
 # Price quantisation
 # ---------------------------------------------------------------------------

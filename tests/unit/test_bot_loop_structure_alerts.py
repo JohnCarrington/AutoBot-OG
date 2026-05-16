@@ -383,6 +383,7 @@ def test_hydrate_populates_previous_structure_from_jsonl(
     }
     jsonl.write_text(json.dumps(rec) + "\n")
     monkeypatch.setenv("STRUCTURE_LOG_PATH", str(jsonl))
+    monkeypatch.setenv("STRUCTURE_LOG_ENABLED", "1")  # M2: hydration is gated
 
     bot, _alerter, feed = _build_bot_with_alerter(monkeypatch)
     feed.hydrate_report = _full_hydration_report(("GBPUSD",))
@@ -402,10 +403,57 @@ def test_hydrate_missing_jsonl_leaves_cache_empty(monkeypatch, tmp_path) -> None
     monkeypatch.setenv(
         "STRUCTURE_LOG_PATH", str(tmp_path / "nonexistent.jsonl"),
     )
+    monkeypatch.setenv("STRUCTURE_LOG_ENABLED", "1")  # M2: hydration is gated
     bot, _alerter, feed = _build_bot_with_alerter(monkeypatch)
     feed.hydrate_report = _full_hydration_report(("GBPUSD",))
     bot.hydrate()
     assert bot._previous_structure == {}
+
+
+def test_hydrate_skipped_when_structure_log_disabled(
+    monkeypatch, tmp_path, caplog,
+) -> None:
+    """M2: when STRUCTURE_LOG_ENABLED is false, hydration is skipped
+    entirely (does not even scan the jsonl path). Without this gate,
+    a "logging-on -> logging-off -> restart" config sequence would
+    leave the engine silent this session but rehydrate from a stale
+    prior-session jsonl, bursting spurious WARNING events on the
+    first post-restart bar.
+    """
+    jsonl = tmp_path / "structure_state.jsonl"
+    rec = {
+        "timestamp": "2026-05-15T12:55:00+00:00",
+        "pair": "GBPUSD",
+        "is_valid": True,
+        "htf_bias": "BEARISH",
+        "local_bias": "NEUTRAL",
+        "nearest_support": 1.30000,
+        "nearest_resistance": 1.31000,
+        "liquidity_above": None,
+        "liquidity_below": None,
+        "current_reaction": "NONE",
+        "acceptance_state": "NONE",
+        "structure_mode": "RANGE_BALANCE",
+        "confidence": 0.7,
+        "reason": "stale",
+        "levels": [],
+    }
+    jsonl.write_text(json.dumps(rec) + "\n")
+    monkeypatch.setenv("STRUCTURE_LOG_PATH", str(jsonl))
+    monkeypatch.delenv("STRUCTURE_LOG_ENABLED", raising=False)
+
+    bot, _alerter, feed = _build_bot_with_alerter(monkeypatch)
+    feed.hydrate_report = _full_hydration_report(("GBPUSD",))
+    with caplog.at_level("INFO", logger="bot.loop"):
+        bot.hydrate()
+
+    # No state was rehydrated despite the jsonl on disk.
+    assert bot._previous_structure == {}
+    # Operator gets a clear log explaining cold-start.
+    assert any(
+        "STRUCTURE_LOG_ENABLED is off" in r.getMessage()
+        for r in caplog.records
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +546,154 @@ def test_alerter_send_exception_does_not_crash_bar_close(
     assert len(matching) >= 1
 
 
+def test_persistence_non_oserror_does_not_crash_bar_close(
+    monkeypatch, caplog,
+) -> None:
+    """M3: append_event_to_jsonl swallows OSError internally; the
+    outer Exception catch in _dispatch_structure_alerts handles the
+    residual cases (TypeError on JSON encode, ValueError on bad
+    datetime). Symmetric coverage with
+    test_processor_exception_does_not_crash_bar_close and
+    test_alerter_send_exception_does_not_crash_bar_close — completes
+    the failure-isolation test trio.
+    """
+    from structure_engine.types import StructureState
+
+    bot, alerter, feed = _build_bot_with_alerter(monkeypatch)
+    bot.start()
+    bot.mark_ready()
+
+    # Seed prev so HTF_BIAS_CHANGE fires (produces at least one event
+    # to persist).
+    bot._previous_structure["GBPUSD"] = StructureState(
+        pair="GBPUSD",
+        timestamp="2026-05-15T12:55:00+00:00",
+        is_valid=True,
+        htf_bias="BEARISH",
+        local_bias="NEUTRAL",
+        nearest_support=None,
+        nearest_resistance=None,
+        liquidity_above=None,
+        liquidity_below=None,
+        current_reaction="NONE",
+        acceptance_state="NONE",
+        structure_mode="RANGE_BALANCE",
+        confidence=0.5,
+        reason="seeded",
+        levels=[],
+        debug={},
+    )
+
+    # Monkey-patch the persistence shim to raise a non-OSError that
+    # the inner function would NOT swallow.
+    import bot.loop as loop_mod
+    def _boom(event, path):
+        raise TypeError("simulated non-encodable payload")
+    monkeypatch.setattr(loop_mod, "append_event_to_jsonl", _boom)
+
+    bar_time = _NOW + timedelta(minutes=5)
+    with caplog.at_level("ERROR", logger="bot.loop"):
+        feed.fire(_bar_close("GBPUSD", bar_time))
+
+    # Outer catch fired with the expected log message.
+    matching = [
+        r for r in caplog.records
+        if "structure_alerts jsonl write failed" in r.getMessage()
+    ]
+    assert len(matching) >= 1
+    # Dispatch still happened (persistence runs AFTER dispatch per
+    # the locked decision).
+    structure_alerts = [
+        a for a in alerter.sent
+        if a.category.value == "STRUCTURE"
+    ]
+    assert len(structure_alerts) >= 1
+    # Bar-close pipeline didn't crash — prev cache still updated.
+    assert bot._previous_structure["GBPUSD"] is not None
+
+
+# ---------------------------------------------------------------------------
+# M5: single clock capture per bar
+# ---------------------------------------------------------------------------
+
+
+def test_dispatch_uses_single_clock_capture_per_bar(monkeypatch) -> None:
+    """M5: ``_clock()`` is called exactly once per bar; every downstream
+    timestamp / dedupe-clock site in the structure-alerts pipeline uses
+    that captured value. Pre-fix, the same bar's diff event and hourly
+    summary carried slightly different timestamps (μs of skew from
+    repeated ``self._clock()`` calls) — production-visible impact was
+    zero, but the locked decision was one shared ``now`` per bar.
+
+    Test setup fires a top-of-hour bar with a seeded prev so the bar
+    produces BOTH a diff event (HTF_BIAS_CHANGE) and a HOURLY_SUMMARY.
+    The clock is monkey-patched to increment on every call; under the
+    fixed code, the dispatched Alerts share one timestamp. Under the
+    pre-fix code, the summary's timestamp would be a later value
+    than the diff event's.
+    """
+    from structure_engine.types import StructureState
+
+    # Stepping clock — every call returns a strictly later datetime
+    # so even μs-level skew is visible.
+    base = _NOW.replace(microsecond=0)
+    counter = {"n": 0}
+
+    def stepping_clock() -> datetime:
+        counter["n"] += 1
+        return base + timedelta(microseconds=counter["n"])
+
+    bot, alerter, feed = _build_bot_with_alerter(
+        monkeypatch, clock=stepping_clock,
+    )
+    bot.start()
+    bot.mark_ready()
+
+    # Seed prev so HTF_BIAS_CHANGE fires on this bar.
+    bot._previous_structure["GBPUSD"] = StructureState(
+        pair="GBPUSD",
+        timestamp="2026-05-15T12:55:00+00:00",
+        is_valid=True,
+        htf_bias="BEARISH",
+        local_bias="NEUTRAL",
+        nearest_support=None,
+        nearest_resistance=None,
+        liquidity_above=None,
+        liquidity_below=None,
+        current_reaction="NONE",
+        acceptance_state="NONE",
+        structure_mode="RANGE_BALANCE",
+        confidence=0.5,
+        reason="seeded",
+        levels=[],
+        debug={},
+    )
+
+    # _NOW = 13:00 — top of hour, fires both kinds.
+    feed.fire(_bar_close("GBPUSD", _NOW))
+
+    structure_alerts = [
+        a for a in alerter.sent if a.category.value == "STRUCTURE"
+    ]
+    # Both a diff event and a summary must have dispatched for this
+    # test to mean anything.
+    subtypes = {a.event_subtype for a in structure_alerts}
+    assert "HTF_BIAS_CHANGE" in subtypes
+    assert "HOURLY_SUMMARY" in subtypes
+
+    # Single capture: every STRUCTURE alert from this bar shares one
+    # timestamp. (Translator inherits AlertEvent.timestamp, which is
+    # the ``now`` passed into processor / summary builder.) Pre-fix,
+    # the summary's timestamp ran a few μs ahead of the diff event's
+    # because _dispatch_structure_alerts and _dispatch_hourly_summary
+    # each called self._clock() independently.
+    timestamps = {a.timestamp for a in structure_alerts}
+    assert len(timestamps) == 1, (
+        f"Expected one shared timestamp across bar's STRUCTURE alerts; "
+        f"got {len(timestamps)}: {sorted(timestamps)}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Persistence integration
 # ---------------------------------------------------------------------------
@@ -509,9 +705,9 @@ def test_structure_alert_persists_to_jsonl_audit_log(
     """Each surviving alert event lands as one line in the audit
     jsonl. Both diff-driven events and the hourly summary."""
     audit_path = tmp_path / "structure_alerts.jsonl"
-    monkeypatch.setattr(
-        "bot.loop.STRUCTURE_ALERTS_LOG_PATH", str(audit_path),
-    )
+    # M4: bot.loop reads the path via structure_alerts_log_path() per
+    # call, which reads STRUCTURE_ALERTS_LOG_PATH from env each time.
+    monkeypatch.setenv("STRUCTURE_ALERTS_LOG_PATH", str(audit_path))
 
     from structure_engine.types import StructureState
 

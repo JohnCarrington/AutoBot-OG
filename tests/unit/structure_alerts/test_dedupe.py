@@ -234,6 +234,77 @@ def test_backwards_clock_jump_fires_rather_than_silently_blocks() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# M6 cleanup commit: time-based eviction
+# ---------------------------------------------------------------------------
+
+
+def test_should_fire_evicts_entries_older_than_dedupe_max_age() -> None:
+    """M6: a key fired at t=0 is dropped from the cache when a later
+    should_fire call sees its age exceed DEDUPE_MAX_AGE_SEC
+    (= 2 × max cooldown = 4h with defaults). Pins the boundary:
+
+    - 4h elapsed → entry still present (4 × 3600 == cutoff, predicate
+      is strict >).
+    - 4h + 1s elapsed → entry evicted on the next sweep.
+
+    Eviction is triggered by ANY should_fire call (not a separate
+    cron / timer), so cache size stays bounded as the bot processes
+    later bars even if a given key is never seen again.
+    """
+    from structure_alerts.constants import DEDUPE_MAX_AGE_SEC
+
+    assert DEDUPE_MAX_AGE_SEC == 4 * 3600  # 2 × INFO 2h
+
+    cache = DedupeCache()
+    stale_key = "GBPUSD_NEW_LEVEL_SUPPORT_13020"
+    cache.should_fire(stale_key, AlertSeverity.INFO, now=_T0)
+    assert cache.size == 1
+
+    # At exactly t=4h the entry is still in the cache (predicate is
+    # `> cutoff`, not `>=`). A different fresh key triggers the sweep
+    # without itself blocking eviction.
+    cache.should_fire(
+        "K_FRESH_AT_4H",
+        AlertSeverity.WARNING,
+        now=_T0 + timedelta(seconds=DEDUPE_MAX_AGE_SEC),
+    )
+    assert cache.last_fired(stale_key) is not None
+
+    # At t=4h+1s the original entry's age exceeds the cutoff; the
+    # next sweep drops it.
+    cache.should_fire(
+        "K_FRESH_AT_4H_1S",
+        AlertSeverity.WARNING,
+        now=_T0 + timedelta(seconds=DEDUPE_MAX_AGE_SEC + 1),
+    )
+    assert cache.last_fired(stale_key) is None
+    # Cache now holds only the two fresh keys.
+    assert cache.size == 2
+
+
+def test_eviction_skips_entries_with_backwards_clock_skew() -> None:
+    """M6: an entry recorded *after* the current `now` (NTP correction
+    or naive test clock) has negative elapsed. The sweep retains it —
+    dropping a record because the wall clock momentarily went
+    backwards would silently lose a recent valid firing.
+    """
+    cache = DedupeCache()
+    future_key = "GBPUSD_HTF_BIAS_BEARISH"
+    # Recorded "in the future" — clock will later be corrected back.
+    cache.should_fire(
+        future_key,
+        AlertSeverity.WARNING,
+        now=_T0 + timedelta(hours=10),
+    )
+    # NTP correction lands; `now` is now far earlier than the record.
+    # The eviction sweep must NOT drop the future entry.
+    cache.should_fire(
+        "K_OTHER", AlertSeverity.WARNING, now=_T0,
+    )
+    assert cache.last_fired(future_key) is not None
+
+
 def test_same_key_different_severity_uses_severity_specific_cooldown() -> None:
     """Severity is read at each call (not bound at first fire) — so a
     pathological caller that fires the same key as INFO then later as

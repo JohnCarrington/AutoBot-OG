@@ -36,6 +36,7 @@ same shape.
 """
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Final, Optional
 
@@ -81,6 +82,24 @@ def _format_price(pair: str, price: float) -> str:
     if pair.upper().endswith("JPY"):
         return f"{price:.3f}"
     return f"{price:.5f}"
+
+
+def _format_score(score: float) -> str:
+    """Render ``score`` for operator-visible bodies; NaN → ``—``.
+
+    L3 (cleanup commit): the engine doesn't produce NaN scores in
+    normal operation, but :class:`StructureLevel.score` is a plain
+    ``float`` and a future feed-degradation or warm-up edge could
+    leak NaN through. Without this guard, a reaction body read
+    ``"score was nan"`` — readable as a bug to anyone watching but
+    misleading at a glance. Mirrors :func:`structure_alerts.summary._format_level_token`
+    NaN handling (which omits the ``(s=X.X)`` token entirely; we
+    substitute ``—`` instead so the surrounding phrasing
+    ``score was X`` stays grammatical).
+    """
+    if isinstance(score, float) and math.isnan(score):
+        return "—"
+    return f"{score:.1f}"
 
 
 def changes_to_events(
@@ -177,14 +196,14 @@ def _reaction_event(
         dedupe_key = f"{pair}_SUPPORT_ACCEPTANCE_{qp}"
         full_text = (
             f"Support broken at {formatted} "
-            f"({level.timeframe}, score was {level.score:.1f})"
+            f"({level.timeframe}, score was {_format_score(level.score)})"
         )
         short_text = f"support broken @ {formatted}"
     elif kind is AlertEventKind.RESISTANCE_ACCEPTANCE_BREAK:
         dedupe_key = f"{pair}_RESISTANCE_ACCEPTANCE_{qp}"
         full_text = (
             f"Resistance broken at {formatted} "
-            f"({level.timeframe}, score was {level.score:.1f})"
+            f"({level.timeframe}, score was {_format_score(level.score)})"
         )
         short_text = f"resistance broken @ {formatted}"
     elif kind is AlertEventKind.SWEEP_RECLAIM:
@@ -237,7 +256,7 @@ def _new_level_event(
         dedupe_key=f"{pair}_NEW_LEVEL_{side}_{qp}",
         full_text=(
             f"New major {side} level at {formatted} "
-            f"({level.timeframe}, score {level.score:.1f})"
+            f"({level.timeframe}, score {_format_score(level.score)})"
         ),
         short_text=f"new {side} @ {formatted}",
         debug={

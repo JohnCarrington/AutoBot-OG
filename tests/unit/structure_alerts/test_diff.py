@@ -374,3 +374,16 @@ def test_multiple_changes_in_one_bar_preserve_emit_order() -> None:
 def test_level_side_collapses_four_way_to_binary(level_type, expected_side) -> None:
     level = make_level(level_type=level_type, price=1.30000)
     assert level_side(level) == expected_side
+
+
+def test_level_side_raises_value_error_on_unknown_level_type() -> None:
+    """L2 (cleanup commit): unknown level_type fails fast with
+    ValueError. Pre-fix, the silent fallthrough mapped any unrecognised
+    type to RESISTANCE, which would route a hypothetical future
+    LevelType (e.g. ``DAILY_PIVOT``) to the wrong side in dedupe keys.
+    The explicit raise surfaces a missing branch at test time rather
+    than at production runtime.
+    """
+    level = make_level(level_type="DAILY_PIVOT", price=1.30000)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="DAILY_PIVOT"):
+        level_side(level)

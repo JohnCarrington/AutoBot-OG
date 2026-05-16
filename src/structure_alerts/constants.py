@@ -66,10 +66,34 @@ COOLDOWN_BY_SEVERITY: dict[AlertSeverity, int] = {
 }
 
 
+# M6 (cleanup commit): time-based eviction threshold for DedupeCache.
+# An entry older than 2× the longest cooldown can no longer affect any
+# dedupe outcome, so it is safe to drop. Sweeping on every should_fire
+# call keeps the cache size proportional to recent activity rather
+# than to the run's total cardinality of (pair, side, quantised_price)
+# tuples — over a multi-month run for four pairs, the upper bound on
+# the unbounded variant was tens of thousands of entries (~1.5MB).
+DEDUPE_MAX_AGE_SEC: int = max(COOLDOWN_BY_SEVERITY.values()) * 2
+
+
 # --- Persistence --------------------------------------------------------
 STRUCTURE_ALERTS_LOG_PATH: str = os.getenv(
     "STRUCTURE_ALERTS_LOG_PATH", "data/alerts/structure_alerts.jsonl"
 )
+
+
+def structure_alerts_log_path() -> str:
+    """Read the audit-log path at call time.
+
+    Mirrors :func:`structure_engine.logging._log_path` (L-2 fix on the
+    Phase 11 logger). The module-level :data:`STRUCTURE_ALERTS_LOG_PATH`
+    captures the env-or-default value at import; this function returns
+    the current env value if set, else falls back to the import-time
+    capture. Lets an operator override the path on a running process
+    without restarting (rarely useful, but keeps the two persistence
+    layers in sync).
+    """
+    return os.getenv("STRUCTURE_ALERTS_LOG_PATH", STRUCTURE_ALERTS_LOG_PATH)
 
 
 def quantise_price(pair: str, price: float) -> int:
@@ -91,8 +115,10 @@ def quantise_price(pair: str, price: float) -> int:
 __all__ = [
     "COOLDOWN_BY_SEVERITY",
     "CRITICAL_COOLDOWN_SEC",
+    "DEDUPE_MAX_AGE_SEC",
     "INFO_COOLDOWN_SEC",
     "STRUCTURE_ALERTS_LOG_PATH",
     "WARNING_COOLDOWN_SEC",
     "quantise_price",
+    "structure_alerts_log_path",
 ]

@@ -184,6 +184,39 @@ def test_reaction_with_missing_level_skipped() -> None:
     assert changes_to_events([change], make_state(), now=_NOW) == []
 
 
+def test_reaction_body_renders_nan_score_as_dash() -> None:
+    """L3 (cleanup commit): when ``StructureLevel.score`` is NaN (a
+    pathological feed/warm-up edge), the operator body must not read
+    ``"score was nan"``. We render ``—`` instead — symmetric with
+    :mod:`structure_alerts.summary`'s ``_format_level_token`` NaN
+    handling.
+    """
+    nan_score = float("nan")
+    level = make_level(
+        level_type="SUPPORT", price=1.33400, score=nan_score, timeframe="H1",
+    )
+    change = StructureChange(
+        kind=ChangeKind.REACTION_OBSERVED,
+        reaction="SUPPORT_ACCEPTANCE_BREAK",
+        level=level,
+    )
+    event = _run_single(change)
+    assert "nan" not in event.full_text.lower()
+    assert "score was —" in event.full_text
+
+
+def test_new_major_level_body_renders_nan_score_as_dash() -> None:
+    """L3 (cleanup commit): same NaN guard for NEW_MAJOR_LEVEL bodies."""
+    nan_score = float("nan")
+    level = make_level(
+        level_type="SUPPORT", price=1.30200, score=nan_score, timeframe="H1",
+    )
+    change = StructureChange(kind=ChangeKind.NEW_MAJOR_LEVEL, level=level)
+    event = _run_single(change)
+    assert "nan" not in event.full_text.lower()
+    assert "score —" in event.full_text
+
+
 # ---------------------------------------------------------------------------
 # NEW_MAJOR_LEVEL
 # ---------------------------------------------------------------------------

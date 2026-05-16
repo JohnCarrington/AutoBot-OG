@@ -113,6 +113,14 @@ docstrings, anchored here for reviewers):
 `Q(price)` is `quantise_price(pair, price)` — integer pip count using
 `config.pair_config.pip_size_for(pair)`.
 
+`HTF_BIAS_CHANGE` keys on the curr bias only (no prev). Operators see
+at-most-one alert per bias *target* per hour (WARNING cooldown), not
+at-most-one alert per bias *transition*: a fast BULLISH → BEARISH →
+NEUTRAL → BEARISH flip-flop reports its first two transitions and
+silently suppresses the second BEARISH-targeted one. Same shape as
+`STRUCTURE_MODE_CHANGE` — accepted by spec §9 as the intended
+trade-off.
+
 ## Heartbeat semantics
 
 Hourly summary fires from M5 BAR_CLOSE at `close_time.minute == 0`.
@@ -152,7 +160,11 @@ translator converts each survived event to `alerts.Alert` with:
 
 The Phase 9 coalescer's key is `(category, event_subtype, pair, severity)`,
 so STRUCTURE alerts naturally coalesce alongside (but never with)
-TRADE / RECONCILIATION / SYSTEM alerts.
+TRADE / RECONCILIATION / SYSTEM alerts. **Pair is part of the key**, so
+N pairs at top-of-hour produce N separate HOURLY_SUMMARY messages
+inside one coalesce window — not one bullet list. Each is a four-line
+body for that pair. Operator should expect N messages per top-of-hour,
+not one.
 
 ## Tests
 

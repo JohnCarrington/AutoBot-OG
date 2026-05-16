@@ -52,6 +52,22 @@ the conservative direction matching Phase 9's
 :class:`AlertCoalescer` (M2 from the Phase 9 review). The
 alternative — silently blocking until the wall clock catches up —
 would mean alerts disappear for the duration of the jump.
+
+Time-based eviction (M6 cleanup commit)
+---------------------------------------
+
+Each :py:meth:`should_fire` call sweeps entries older than
+:data:`DEDUPE_MAX_AGE_SEC` (= 2 × the longest cooldown = 4 h with
+defaults). Entries that old cannot affect any dedupe outcome — even
+INFO's 2 h cooldown has elapsed — so they're safe to drop. Without
+the sweep, level-anchored keys
+(``{pair}_NEW_LEVEL_{side}_{Q(price)}``, etc.) accumulated as the
+market visited new quantised prices: tens of thousands of entries
+over a multi-month run for four pairs. Bounded in memory either way,
+but the sweep keeps the cache size proportional to recent activity.
+The sweep skips entries with a backwards clock skew (negative
+``elapsed``) — they stay so a corrected wall-clock doesn't appear to
+drop a valid recent record.
 """
 from __future__ import annotations
 
@@ -61,7 +77,7 @@ from typing import Optional
 
 from alerts import AlertSeverity
 
-from .constants import COOLDOWN_BY_SEVERITY
+from .constants import COOLDOWN_BY_SEVERITY, DEDUPE_MAX_AGE_SEC
 
 
 logger = logging.getLogger(__name__)
@@ -117,6 +133,7 @@ class DedupeCache:
             Current time. Caller (typically the C-5 processor)
             passes ``self._clock()`` from BotLoop.
         """
+        self._evict_stale(now)
         cooldown_seconds = COOLDOWN_BY_SEVERITY[severity]
         last = self._last_fired.get(key)
         if last is not None:
@@ -128,6 +145,24 @@ class DedupeCache:
                 return False
         self._last_fired[key] = now
         return True
+
+    def _evict_stale(self, now: datetime) -> None:
+        """Drop entries older than :data:`DEDUPE_MAX_AGE_SEC`.
+
+        Called on every :py:meth:`should_fire`. Walks the dict once
+        (O(N) per call, ~tens of microseconds at realistic sizes of
+        a few hundred keys). Entries with a *negative* elapsed —
+        recorded after ``now`` due to a backwards clock skew — are
+        retained: dropping them would silently lose a valid recent
+        record when an NTP correction lands.
+        """
+        cutoff = DEDUPE_MAX_AGE_SEC
+        stale = [
+            key for key, last in self._last_fired.items()
+            if (now - last).total_seconds() > cutoff
+        ]
+        for key in stale:
+            del self._last_fired[key]
 
     def last_fired(self, key: str) -> Optional[datetime]:
         """Return the last firing time for ``key`` or ``None``.
