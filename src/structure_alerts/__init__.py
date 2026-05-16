@@ -16,6 +16,7 @@ Public surface today:
 """
 from __future__ import annotations
 
+from .alert_translator import translate_to_phase9_alert
 from .constants import (
     CRITICAL_COOLDOWN_SEC,
     INFO_COOLDOWN_SEC,
@@ -23,17 +24,26 @@ from .constants import (
     WARNING_COOLDOWN_SEC,
     quantise_price,
 )
+from .dedupe import DedupeCache
 from .hydration import load_latest_structure_state_per_pair
+from .persistence import append_event_to_jsonl
+from .processor import process_structure_alerts
+from .summary import build_hourly_summary
 from .types import AlertEvent, AlertEventKind, severity_for
 
 __all__ = [
     "AlertEvent",
     "AlertEventKind",
     "CRITICAL_COOLDOWN_SEC",
+    "DedupeCache",
     "INFO_COOLDOWN_SEC",
     "STRUCTURE_ALERTS_LOG_PATH",
     "WARNING_COOLDOWN_SEC",
+    "append_event_to_jsonl",
+    "build_hourly_summary",
     "load_latest_structure_state_per_pair",
+    "process_structure_alerts",
     "quantise_price",
     "severity_for",
+    "translate_to_phase9_alert",
 ]
