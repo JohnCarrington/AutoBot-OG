@@ -14,9 +14,31 @@ import pytest
 from regime.labels import Direction, RegimeLabel
 from strategies import dispatcher
 from strategies.signal import Signal, compute_invalid_after
+from structure_engine import StructureState
 
 
 _NOW = datetime(2025, 5, 14, 13, 0, tzinfo=timezone.utc)
+
+
+def _stub_structure_state() -> StructureState:
+    return StructureState(
+        pair="GBPUSD",
+        timestamp=_NOW.isoformat(),
+        is_valid=True,
+        htf_bias="NEUTRAL",
+        local_bias="NEUTRAL",
+        nearest_support=None,
+        nearest_resistance=None,
+        liquidity_above=None,
+        liquidity_below=None,
+        current_reaction="NONE",
+        acceptance_state="NONE",
+        structure_mode="UNKNOWN",
+        confidence=0.0,
+        reason="stub",
+        levels=[],
+        debug={},
+    )
 
 
 def _stub_signal(strategy_name: str, regime: RegimeLabel) -> Signal:
@@ -51,12 +73,13 @@ def _stub(strategy_name: str, regime: RegimeLabel) -> Callable[..., object]:
     """Build a stub detect_* that records its call and returns a signal."""
     calls: list[dict] = []
 
-    def _fn(df_m5, df_h1, regime_state, pair, current_time):  # type: ignore[no-untyped-def]
+    def _fn(df_m5, df_h1, regime_state, structure_state, pair, current_time):  # type: ignore[no-untyped-def]
         calls.append(
             {
                 "df_m5_id": id(df_m5),
                 "pair": pair,
                 "regime": regime_state.get("current_regime"),
+                "structure_state_id": id(structure_state),
             }
         )
         return _stub_signal(strategy_name, regime)
@@ -87,6 +110,7 @@ def test_range_routes_to_bb_reclaim(monkeypatch, empty_frames) -> None:
         df_m5=empty_frames[0],
         df_h1=empty_frames[1],
         regime_state=_state("RANGE"),
+        structure_state=_stub_structure_state(),
         pair="GBPUSD",
         current_time=_NOW,
     )
@@ -102,6 +126,7 @@ def test_trend_routes_to_ema_continuation(monkeypatch, empty_frames) -> None:
         df_m5=empty_frames[0],
         df_h1=empty_frames[1],
         regime_state=_state("TREND"),
+        structure_state=_stub_structure_state(),
         pair="GBPUSD",
         current_time=_NOW,
     )
@@ -116,6 +141,7 @@ def test_volatile_routes_to_liquidity_sweep(monkeypatch, empty_frames) -> None:
         df_m5=empty_frames[0],
         df_h1=empty_frames[1],
         regime_state=_state("VOLATILE"),
+        structure_state=_stub_structure_state(),
         pair="GBPUSD",
         current_time=_NOW,
     )
@@ -131,6 +157,7 @@ def test_transition_returns_empty(monkeypatch, empty_frames) -> None:
         df_m5=empty_frames[0],
         df_h1=empty_frames[1],
         regime_state=_state("TRANSITION"),
+        structure_state=_stub_structure_state(),
         pair="GBPUSD",
         current_time=_NOW,
     )
@@ -143,6 +170,7 @@ def test_unknown_regime_returns_empty(monkeypatch, empty_frames) -> None:
         df_m5=empty_frames[0],
         df_h1=empty_frames[1],
         regime_state=_state("NONSENSE"),
+        structure_state=_stub_structure_state(),
         pair="GBPUSD",
         current_time=_NOW,
     )
@@ -158,6 +186,7 @@ def test_strategy_returns_none_yields_empty_list(monkeypatch, empty_frames) -> N
         df_m5=empty_frames[0],
         df_h1=empty_frames[1],
         regime_state=_state("RANGE"),
+        structure_state=_stub_structure_state(),
         pair="GBPUSD",
         current_time=_NOW,
     )
@@ -179,6 +208,7 @@ def test_only_matching_strategy_invoked(monkeypatch, empty_frames) -> None:
         df_m5=empty_frames[0],
         df_h1=empty_frames[1],
         regime_state=_state("RANGE"),
+        structure_state=_stub_structure_state(),
         pair="GBPUSD",
         current_time=_NOW,
     )
@@ -196,6 +226,7 @@ def test_return_type_is_always_list(monkeypatch, empty_frames) -> None:
         df_m5=empty_frames[0],
         df_h1=empty_frames[1],
         regime_state=_state("RANGE"),
+        structure_state=_stub_structure_state(),
         pair="GBPUSD",
         current_time=_NOW,
     )

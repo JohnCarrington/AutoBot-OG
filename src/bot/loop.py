@@ -89,6 +89,7 @@ from risk.types import (
 from strategies.dispatcher import detect_all_setups
 from strategies.signal import Signal
 from structure import add_fractal_swings
+from structure_engine import analyze_structure, log_structure_state
 
 from .constants import (
     BOT_MAX_CONSECUTIVE_EVENT_FAILURES,
@@ -606,8 +607,27 @@ class BotLoop:
         df_h1_enriched = self._derive_and_enrich_h1(
             df_m5_enriched, m5_close_time=candle.close_time,
         )
+        df_m15_enriched = self._derive_and_enrich_m15(
+            df_m5_enriched, m5_close_time=candle.close_time,
+        )
 
         self._update_regime(pair, df_m5_enriched, df_h1_enriched, candle)
+
+        # Phase 11: Structure Engine analysis. Always-on per the same
+        # rationale as the regime update — gap-fill bars feed it so the
+        # historical view stays consistent. The signal gate below still
+        # suppresses *trades*; this runs purely for state + jsonl
+        # observability. session_state is a Phase 11 stub (None); a
+        # follow-up phase will wire a SessionTracker.
+        structure_state = analyze_structure(
+            pair=pair,
+            candles_m5=df_m5_enriched,
+            candles_m15=df_m15_enriched,
+            candles_h1=df_h1_enriched,
+            regime_state=self._pair_state[pair].regime_engine.get_state(),
+            session_state=None,
+        )
+        log_structure_state(structure_state)
 
         # 2. Periodic tasks. Run before the signal gate so reconciliation
         #    and force-close fire during STALE / RESUMING windows where
@@ -627,7 +647,9 @@ class BotLoop:
             or is_gap_fill
         )
         if not signals_blocked:
-            self._run_signal_pipeline(pair, df_m5_enriched, df_h1_enriched)
+            self._run_signal_pipeline(
+                pair, df_m5_enriched, df_h1_enriched, structure_state,
+            )
 
         # 5. SL evaluation per open position (BAR_CLOSE cadence, design
         #    decision #1 — not BAR_UPDATE, not separate timer).
@@ -652,13 +674,24 @@ class BotLoop:
 
         v1 indicators (locked in ``docs/v1_architecture.md`` §3):
         ATR(14), EMA(20), EMA(50), Bollinger(20, 2), MACD(12, 26, 9),
-        plus the ATR-normalised EMA-slope and BB-width. The pipeline
-        is pure-functional — each ``add_*`` returns a new column on
-        a copy of the DataFrame.
+        plus the ATR-normalised EMA-slope and BB-width.
+
+        Phase 11 additions (Structure Engine spec §2 + §9):
+        EMA(8), EMA(13), EMA(21), EMA(100), EMA(200) for HTF / local
+        bias detection. EMA(200) NaN-pads through its first 200 bars
+        (``add_ema`` enforces ``min_periods=period``); the bias
+        detector falls back to EMA(100) → EMA(50) until EMA(200) warms
+        up — see ``src/structure_engine/MODULE.md`` "EMA warm-up
+        degradation".
         """
         out = add_atr(df, period=14)
+        out = add_ema(out, period=8)
+        out = add_ema(out, period=13)
         out = add_ema(out, period=20)
+        out = add_ema(out, period=21)
         out = add_ema(out, period=50)
+        out = add_ema(out, period=100)
+        out = add_ema(out, period=200)
         out = add_bollinger(out, period=20, std_mult=2.0)
         out = add_macd(out, fast=12, slow=26, signal=9)
         out = add_ema_slope_normalised(out, period=50, lookback=10, atr_period=14)
@@ -721,6 +754,55 @@ class BotLoop:
         df_m5 = self._apply_indicators(df_m5)
         df_m5 = add_fractal_swings(df_m5)
         return self._derive_and_enrich_h1(df_m5, m5_close_time=m5_close_time)
+
+    def _derive_and_enrich_m15(
+        self, df_m5: pd.DataFrame, *, m5_close_time: datetime,
+    ) -> pd.DataFrame:
+        """Roll M5 → M15 by pandas resample, then apply M15 indicators.
+
+        Phase 11 mirrors the H1 derivation pattern for the Structure
+        Engine's M15 input (no separate M15 Lightstreamer subscription;
+        locked decision #2 in the Phase 11 plan). The resample uses
+        ``label="right"`` and ``closed="right"`` so each M15 bar is
+        anchored on its close, matching the M5 buffer's convention.
+
+        Trim the trailing partial M15 unless the M5 close that
+        triggered this call lands exactly on a 15-minute boundary
+        (``minute % 15 == 0``). Same rationale as the H1 trim: an
+        in-progress bin recomputes on every M5 tick and the Structure
+        Engine's swing detector needs per-M15-bar stability.
+        """
+        if df_m5.empty:
+            return df_m5
+        agg = df_m5.resample("15min", label="right", closed="right").agg(
+            {
+                "open": "first",
+                "high": "max",
+                "low": "min",
+                "close": "last",
+                "volume": "sum",
+            }
+        ).dropna()
+        if agg.empty:
+            return agg
+        if m5_close_time.minute % 15 != 0:
+            agg = agg.iloc[:-1]
+        if agg.empty:
+            return agg
+        return self._apply_indicators(agg)
+
+    def _m15_for_test(self, pair: str, *, m5_close_time: datetime) -> pd.DataFrame:
+        """Test seam returning the M15 dataframe a BAR_CLOSE would produce.
+
+        Mirrors :py:meth:`_derive_and_enrich_m15` but is reachable from
+        tests without firing a full event.
+        """
+        df_m5 = self._build_m5_dataframe(pair)
+        if df_m5.empty:
+            return df_m5
+        df_m5 = self._apply_indicators(df_m5)
+        df_m5 = add_fractal_swings(df_m5)
+        return self._derive_and_enrich_m15(df_m5, m5_close_time=m5_close_time)
 
     # ------------------------------------------------------------------
     # Regime
@@ -971,7 +1053,11 @@ class BotLoop:
     # ------------------------------------------------------------------
 
     def _run_signal_pipeline(
-        self, pair: str, df_m5: pd.DataFrame, df_h1: pd.DataFrame,
+        self,
+        pair: str,
+        df_m5: pd.DataFrame,
+        df_h1: pd.DataFrame,
+        structure_state,
     ) -> None:
         engine = self._pair_state[pair].regime_engine
         if not engine.is_live():
@@ -981,6 +1067,7 @@ class BotLoop:
             df_m5=df_m5,
             df_h1=df_h1,
             regime_state=engine.get_state(),
+            structure_state=structure_state,
             pair=pair,
             current_time=now,
         )
