@@ -11,6 +11,7 @@ in place of doing their own pattern detection (spec §13 gates).
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 
 import pandas as pd
@@ -23,6 +24,9 @@ from .bb_reclaim import detect_bb_reclaim
 from .ema_continuation import detect_ema_continuation
 from .liquidity_sweep import detect_liquidity_sweep
 from .signal import Signal
+
+
+logger = logging.getLogger(__name__)
 
 
 def detect_all_setups(
@@ -60,9 +64,19 @@ def detect_all_setups(
             df_m5, df_h1, regime_state, structure_state, pair, current_time
         )
     else:
+        logger.info(
+            "no setups for %s: regime=%s (no matching strategy route)",
+            pair, current,
+        )
         return []
 
-    return [result] if result is not None else []
+    if result is None:
+        logger.info(
+            "no setups for %s: regime=%s strategy gates rejected this bar",
+            pair, current,
+        )
+        return []
+    return [result]
 
 
 __all__ = ["detect_all_setups"]

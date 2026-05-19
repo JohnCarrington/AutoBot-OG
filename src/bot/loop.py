@@ -932,6 +932,14 @@ class BotLoop:
         if not df_m5.empty:
             engine.process_m5_close(df_m5.iloc[-1])
 
+        state = engine.get_state()
+        logger.info(
+            "regime[%s] current=%s direction=%s is_live=%s reason=%s",
+            pair, state.get("current_regime"),
+            state.get("current_direction"), engine.is_live(),
+            state.get("reason"),
+        )
+
     # ------------------------------------------------------------------
     # Periodic tasks (inline scheduler)
     # ------------------------------------------------------------------
@@ -1161,7 +1169,15 @@ class BotLoop:
     ) -> None:
         engine = self._pair_state[pair].regime_engine
         if not engine.is_live():
-            return  # regime in TRANSITION — strategies don't fire
+            # regime in TRANSITION — strategies don't fire
+            state = engine.get_state()
+            logger.info(
+                "signal pipeline skipped for %s: regime not live "
+                "(current=%s direction=%s reason=%s)",
+                pair, state.get("current_regime"),
+                state.get("current_direction"), state.get("reason"),
+            )
+            return
         now = self._clock()
         signals = detect_all_setups(
             df_m5=df_m5,
