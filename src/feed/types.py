@@ -69,7 +69,13 @@ class Candle:
     low: float
     close: float
     volume: float
-    source: Literal["LS_NATIVE_5M", "REST"]
+    source: Literal["LS_NATIVE_5M", "REST", "DERIVED"]
+    # "DERIVED" identifies candles synthesised inside the bot from
+    # bars at a finer timeframe — e.g. the Phase B H1 buffer is
+    # populated via _synthesise_h1_from_m5_tail from the M5 buffer's
+    # last hour of bars. Distinct from "REST" (history endpoint) and
+    # "LS_NATIVE_5M" (live Lightstreamer) so ops can tell at a glance
+    # whether an H1 bar came over the wire or was computed locally.
 
 
 # ---------------------------------------------------------------------------

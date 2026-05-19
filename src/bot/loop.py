@@ -69,9 +69,11 @@ from execution.types import (
     ReconciliationEvent,
     ReconciliationKind,
 )
+from feed.constants import FEED_H1_MIN_USABLE_BARS
 from feed.feed_manager import FeedManager
 from feed.ig_rest.client import IGClient
 from feed.ig_rest.markets import fetch_market_info
+from feed.rolling_buffer import RollingBuffer
 from feed.types import Candle, FeedEvent, FeedEventKind
 from indicators.atr import add_atr
 from indicators.bollinger import add_bollinger
@@ -674,10 +676,16 @@ class BotLoop:
         if df_m5.empty:
             logger.warning("BAR_CLOSE for %s but rolling buffer is empty", pair)
             return
+        # Phase B: synthesise the H1 candle for the hour this M5 bar
+        # belongs to and push it into the H1 buffer (in-place replace
+        # mid-hour, append on hour boundary). No-op when the H1 buffer
+        # is absent — the flag-off path falls through to the legacy
+        # M5-resample dispatcher untouched.
+        self._maybe_push_synthesised_h1(pair, candle.close_time)
         df_m5_enriched = self._apply_indicators(df_m5)
         df_m5_enriched = add_fractal_swings(df_m5_enriched)
         df_h1_enriched = self._derive_and_enrich_h1(
-            df_m5_enriched, m5_close_time=candle.close_time,
+            df_m5_enriched, m5_close_time=candle.close_time, pair=pair,
         )
         df_m15_enriched = self._derive_and_enrich_m15(
             df_m5_enriched, m5_close_time=candle.close_time,
@@ -780,6 +788,47 @@ class BotLoop:
         return out
 
     def _derive_and_enrich_h1(
+        self,
+        df_m5: pd.DataFrame,
+        *,
+        m5_close_time: datetime,
+        pair: Optional[str] = None,
+    ) -> pd.DataFrame:
+        """Return the H1 DataFrame the BAR_CLOSE pipeline consumes.
+
+        Phase B dispatcher. Routes to either the new H1-buffer-fed path
+        or the legacy M5-resample path, transparently to callers
+        (strategies, regime engine, structure engine).
+
+        When ``pair`` is ``None`` (the historical signature used by the
+        ``_h1_for_test`` seam) OR the H1 buffer is absent OR has fewer
+        than :data:`FEED_H1_MIN_USABLE_BARS` bars, the legacy path is
+        used. This is what makes Commit 2 byte-identical to the
+        Phase 7 baseline whenever the flag is off — the dispatcher
+        falls through to ``_legacy_h1_from_m5`` which is the verbatim
+        Phase 7 implementation.
+
+        When the buffer IS populated, we read its bars directly. The
+        BAR_CLOSE handler's earlier ``_maybe_push_synthesised_h1`` call
+        ensures the buffer's tail is the forming H1 for the current
+        hour; mid-hour we trim it (mirroring the legacy resample's
+        in-progress drop) so strategies see only fully-closed H1 bars.
+        """
+        buf_h1: Optional[RollingBuffer] = None
+        if pair is not None:
+            buf_h1 = self._feed.buffer_for_h1(pair)
+        if buf_h1 is None or len(buf_h1) < FEED_H1_MIN_USABLE_BARS:
+            return self._legacy_h1_from_m5(df_m5, m5_close_time=m5_close_time)
+        df_h1 = buf_h1.to_dataframe()
+        if m5_close_time.minute != 0:
+            # Trim the in-progress H1 — mirrors the legacy resample
+            # which drops the trailing bin at non-hour M5 closes.
+            df_h1 = df_h1.iloc[:-1]
+        if df_h1.empty:
+            return df_h1
+        return self._apply_indicators(df_h1)
+
+    def _legacy_h1_from_m5(
         self, df_m5: pd.DataFrame, *, m5_close_time: datetime,
     ) -> pd.DataFrame:
         """Roll M5 → H1 by pandas resample, then apply H1 indicators.
@@ -800,6 +849,11 @@ class BotLoop:
         Fix: drop the trailing forming H1 unless the M5 close that
         triggered this call is exactly on an hour boundary (minute=0,
         meaning the M5 bar closing now also closed an H1).
+
+        Phase B note: this is the fallback path when the H1 buffer is
+        absent / under-warmed. It must remain functionally untouched —
+        the 1157-test baseline pins exact regime / structure / signal
+        outputs against this resample-derived H1 frame.
         """
         if df_m5.empty:
             return df_m5
@@ -821,6 +875,47 @@ class BotLoop:
         if agg.empty:
             return agg
         return self._apply_indicators(agg)
+
+    # ------------------------------------------------------------------
+    # H1 buffer maintenance (Phase B)
+    # ------------------------------------------------------------------
+
+    def _maybe_push_synthesised_h1(
+        self, pair: str, m5_close_time: datetime,
+    ) -> None:
+        """Push the H1 candle for ``m5_close_time``'s hour into the H1 buffer.
+
+        No-op when the H1 buffer is absent (flag-off path). When
+        present, this is what keeps the buffer's tail aligned with the
+        in-progress hour: every M5 BAR_CLOSE re-synthesises the
+        forming H1 from the M5 buffer's last bars and pushes it, which
+        :py:meth:`RollingBuffer.push` either appends (new hour) or
+        replaces in place (same close_time).
+        """
+        buf_h1 = self._feed.buffer_for_h1(pair)
+        if buf_h1 is None:
+            return
+        buf_m5 = self._feed.buffer_for(pair)
+        if buf_m5 is None:
+            return
+        hour_start = _hour_floor_for_m5_close(m5_close_time)
+        synth = _synthesise_h1_from_m5_tail(buf_m5, hour_start)
+        if synth is None:
+            return
+        try:
+            buf_h1.push(synth)
+        except ValueError as exc:
+            # Out-of-order push — log and swallow. Mirrors the
+            # FeedManager's H4 handling: this can only happen if the
+            # M5 buffer has drifted relative to the H1 buffer, which
+            # is itself a wire-protocol-style regression. Don't crash
+            # BAR_CLOSE; surface for ops.
+            logger.warning(
+                "H1 synthesise/push for %s rejected: %s "
+                "(hour_start=%s, m5_close_time=%s)",
+                pair, exc, hour_start.isoformat(),
+                m5_close_time.isoformat(),
+            )
 
     def _h1_for_test(self, pair: str, *, m5_close_time: datetime) -> pd.DataFrame:
         """Test seam returning the H1 dataframe a BAR_CLOSE would produce.
@@ -1821,6 +1916,76 @@ class BotLoop:
         #     (with broker context); reconciliation never sets this
         #     kind for v1 but the enum lists it for forward compat.
         return
+
+
+# ---------------------------------------------------------------------------
+# H1 synthesis helpers (Phase B)
+# ---------------------------------------------------------------------------
+
+
+def _hour_floor_for_m5_close(m5_close_time: datetime) -> datetime:
+    """Return the start of the H1 bar that ``m5_close_time`` belongs to.
+
+    An M5 bar with ``close_time = 10:00:00`` covers the 09:55→10:00
+    window — it's the *last* M5 of the 09:00 H1 bar, so it belongs to
+    hour 09:00. An M5 bar closing at 09:35 covers 09:30→09:35 and
+    belongs to hour 09:00 too. The rule: the M5 bar's open time
+    (``close_time - 5min``) determines the hour, then floor.
+    """
+    open_time = m5_close_time - timedelta(minutes=5)
+    return open_time.replace(minute=0, second=0, microsecond=0)
+
+
+def _synthesise_h1_from_m5_tail(
+    buffer_m5: RollingBuffer, hour_start_utc: datetime,
+) -> Optional[Candle]:
+    """Build a single H1 :class:`Candle` from the M5 buffer's tail.
+
+    Aggregates every M5 bar whose ``open_time`` (= ``close_time - 5min``)
+    falls in the half-open window ``[hour_start_utc, hour_start_utc + 1h)``.
+    Returns ``None`` when no M5 bars match — the BAR_CLOSE handler's
+    caller treats that as "nothing to push for this hour", which is
+    the expected outcome at cold-start before the M5 buffer has filled
+    the current hour.
+
+    Returned candle:
+
+    - ``open``  = first matching M5 bar's open
+    - ``high``  = max of matching highs
+    - ``low``   = min of matching lows
+    - ``close`` = last matching M5 bar's close (which is the bar that
+      just triggered BAR_CLOSE for in-progress hours, or the 12th M5
+      for completed hours)
+    - ``volume`` = sum of matching volumes
+    - ``close_time`` = ``hour_start_utc + 1h`` exactly — i.e. on the
+      next hour boundary, mirroring how the IG REST H1 history endpoint
+      labels bars and how :py:func:`feed.hydration.parse_ig_history`
+      now produces them (post Commit 1's parser fix).
+    - ``source`` = ``"DERIVED"`` so ops can tell synthesised H1 bars
+      apart from REST-hydrated ones (e.g. when post-mortem-ing a
+      buffer dump).
+    """
+    candles = buffer_m5.snapshot()
+    if not candles:
+        return None
+    hour_end = hour_start_utc + timedelta(hours=1)
+    matching = [
+        c for c in candles
+        if hour_start_utc <= (c.close_time - timedelta(minutes=5)) < hour_end
+    ]
+    if not matching:
+        return None
+    pair = matching[0].pair
+    return Candle(
+        pair=pair,
+        close_time=hour_end,
+        open=matching[0].open,
+        high=max(c.high for c in matching),
+        low=min(c.low for c in matching),
+        close=matching[-1].close,
+        volume=sum(c.volume for c in matching),
+        source="DERIVED",
+    )
 
 
 __all__ = ["BotLoop"]

@@ -63,6 +63,14 @@ class _FakeFeed:
     def buffer_for(self, pair: str) -> Optional[_FakeBuffer]:
         return self._buffers.get(pair)
 
+    def buffer_for_h1(self, pair: str) -> Optional[_FakeBuffer]:
+        # Phase B accessor — returning None routes the H1 dispatcher
+        # to the legacy M5-resample path, preserving the byte-identical
+        # baseline for these tests. The new tests in
+        # test_bot_loop_h1_synthesis.py / test_bot_loop_h1_hydration.py
+        # exercise the buffer-populated branch directly.
+        return None
+
     def latest_candle(self, pair: str) -> Optional[Candle]:
         buf = self._buffers.get(pair)
         return buf.latest() if buf else None
