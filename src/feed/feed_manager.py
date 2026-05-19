@@ -69,8 +69,12 @@ from typing import Any, Callable, Optional
 
 from .archive import CandleArchive
 from .constants import (
+    FEED_ARCHIVE_CSV_TEMPLATE_H1,
     FEED_BACKFILL_BARS,
     FEED_GAP_FILL_WINDOW_MIN,
+    FEED_H1_BUFFER_CAPACITY,
+    FEED_H1_HYDRATION_ENABLED,
+    FEED_H1_MIN_USABLE_BARS,
     FEED_WATCHDOG_STALE_SEC,
     MARKET_HOURS_GUARDS,
 )
@@ -144,6 +148,12 @@ class _PairState:
     last_emitted_was_closed: bool = False
     last_update_time_utc: Optional[datetime] = None
     out_of_order_count: int = 0
+    # Phase B H1 hydration plumbing — populated only when
+    # FEED_H1_HYDRATION_ENABLED. Both fields are None on the legacy
+    # default-off path, and the bot loop's dispatcher treats a None
+    # buffer_h1 as "use the M5-resample fallback".
+    archive_h1: Optional[CandleArchive] = None
+    buffer_h1: Optional[RollingBuffer] = None
 
 
 # ---------------------------------------------------------------------------
@@ -158,12 +168,19 @@ class PairSetup:
     ``epic`` is the IG epic to subscribe to; ``archive`` and
     ``buffer`` are optional pre-built instances (useful in tests).
     Production callers can let the manager construct them.
+
+    ``archive_h1`` / ``buffer_h1`` are the optional Phase B H1
+    counterparts. Tests can inject them directly; production callers
+    leave them ``None`` and :py:meth:`FeedManager.from_pairs`
+    constructs them iff :data:`FEED_H1_HYDRATION_ENABLED`.
     """
 
     pair: str
     epic: str
     archive: Optional[CandleArchive] = None
     buffer: Optional[RollingBuffer] = None
+    archive_h1: Optional[CandleArchive] = None
+    buffer_h1: Optional[RollingBuffer] = None
 
 
 class FeedManager:
@@ -230,8 +247,32 @@ class FeedManager:
         for p in pairs:
             archive = p.archive or CandleArchive(p.pair)
             buffer = p.buffer or RollingBuffer(p.pair)
+            # H1 plumbing is constructed only when the flag is on AND
+            # the caller didn't already supply pre-built instances.
+            # Capacity hard-floors at FEED_H1_MIN_USABLE_BARS so an
+            # ops override can't shrink the buffer below what the
+            # classifier needs to warm up.
+            archive_h1 = p.archive_h1
+            buffer_h1 = p.buffer_h1
+            if FEED_H1_HYDRATION_ENABLED:
+                if archive_h1 is None:
+                    archive_h1 = CandleArchive(
+                        p.pair, template=FEED_ARCHIVE_CSV_TEMPLATE_H1,
+                    )
+                if buffer_h1 is None:
+                    h1_capacity = max(
+                        FEED_H1_BUFFER_CAPACITY, FEED_H1_MIN_USABLE_BARS,
+                    )
+                    buffer_h1 = RollingBuffer(p.pair, capacity=h1_capacity)
             states.append(
-                _PairState(pair=p.pair, epic=p.epic, archive=archive, buffer=buffer)
+                _PairState(
+                    pair=p.pair,
+                    epic=p.epic,
+                    archive=archive,
+                    buffer=buffer,
+                    archive_h1=archive_h1,
+                    buffer_h1=buffer_h1,
+                )
             )
         return cls(
             states,
@@ -253,7 +294,12 @@ class FeedManager:
         """
         bundles = [
             PairBundle(
-                pair=s.pair, epic=s.epic, archive=s.archive, buffer=s.buffer
+                pair=s.pair,
+                epic=s.epic,
+                archive=s.archive,
+                buffer=s.buffer,
+                archive_h1=s.archive_h1,
+                buffer_h1=s.buffer_h1,
             )
             for s in self._pair_states.values()
         ]
@@ -327,6 +373,19 @@ class FeedManager:
         """Return the rolling buffer for ``pair``, or ``None`` if absent."""
         state = self._pair_states.get(pair)
         return state.buffer if state is not None else None
+
+    def buffer_for_h1(self, pair: str) -> Optional[RollingBuffer]:
+        """Return the H1 rolling buffer for ``pair``, or ``None``.
+
+        Returns ``None`` when the H1 hydration flag is off (the field
+        was never populated) OR when the pair is unknown. The bot
+        loop's H1 dispatcher treats ``None`` as the signal to fall
+        back to the legacy M5-resample derivation.
+        """
+        state = self._pair_states.get(pair)
+        if state is None:
+            return None
+        return state.buffer_h1
 
     def out_of_order_counts(self) -> dict[str, int]:
         """Return per-pair count of LS payloads dropped as out-of-order.

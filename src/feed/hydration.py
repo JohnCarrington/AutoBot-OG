@@ -73,6 +73,9 @@ from .archive import CandleArchive
 from .constants import (
     FEED_BACKFILL_BARS,
     FEED_FRESHNESS_THRESHOLD_MIN,
+    FEED_H1_BACKFILL_BARS,
+    FEED_H1_HYDRATION_ENABLED,
+    FEED_H1_MIN_USABLE_BARS,
     FEED_MIN_USABLE_BARS,
 )
 from .rolling_buffer import RollingBuffer
@@ -132,11 +135,20 @@ class HydrationReport:
     no pair is in ``mode="failed"``. ``cache_only_degraded`` pairs
     are considered OK for trading purposes (the cache seeded the
     buffer) but carry an ``error`` string for ops visibility.
+
+    ``per_pair_h1`` carries the optional H1 hydration leg added in
+    Phase B. It is an empty tuple when the H1 flag is off, so
+    existing callers that only inspect ``per_pair`` see no change.
+    The aggregate ``ok``/``failed_pairs``/``degraded_pairs``
+    properties intentionally ignore the H1 leg — a partial H1
+    failure must NOT block bot startup; the bot loop's dispatcher
+    falls back to the legacy M5-resample H1 path automatically.
     """
 
     started_at_utc: datetime
     finished_at_utc: datetime
     per_pair: tuple[PairHydrationReport, ...]
+    per_pair_h1: tuple[PairHydrationReport, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -169,8 +181,46 @@ an in-memory stub.
 """
 
 
+# IG resolution string → bar duration. Used by parse_ig_history to
+# compute close_time from the snapshot (bar-open) timestamp. The
+# default M5 entry preserves the legacy behaviour (close = open + 5m);
+# the H1 entry is what unlocks Phase B Commit 2 — REST H1 close_times
+# must land on hour boundaries to match what _synthesise_h1_from_m5_tail
+# produces from M5 BAR_CLOSE bars.
+_RESOLUTION_TO_DURATION: dict[str, timedelta] = {
+    "MINUTE_5":  timedelta(minutes=5),
+    "MINUTE_15": timedelta(minutes=15),
+    "MINUTE_30": timedelta(minutes=30),
+    "HOUR":      timedelta(hours=1),
+    "HOUR_2":    timedelta(hours=2),
+    "HOUR_4":    timedelta(hours=4),
+    "DAY":       timedelta(days=1),
+    "WEEK":      timedelta(weeks=1),
+}
+
+
+def _resolution_to_duration(resolution: str) -> timedelta:
+    """Map an IG resolution string to the bar duration.
+
+    Raises :class:`ValueError` on unknown resolutions so a typo in a
+    caller fails loudly at parse time rather than silently producing
+    wrong-cadence candles. Add new mappings here when a new
+    timeframe is genuinely needed — there's no fallback by design.
+    """
+    try:
+        return _RESOLUTION_TO_DURATION[resolution]
+    except KeyError as exc:
+        raise ValueError(
+            f"parse_ig_history: unknown IG resolution {resolution!r}; "
+            f"expected one of {sorted(_RESOLUTION_TO_DURATION)}"
+        ) from exc
+
+
 def parse_ig_history(
-    pair: str, raw: Mapping[str, Any]
+    pair: str,
+    raw: Mapping[str, Any],
+    *,
+    resolution: str = "MINUTE_5",
 ) -> list[Candle]:
     """Parse a raw IG `/prices` response into :class:`Candle` list.
 
@@ -192,9 +242,15 @@ def parse_ig_history(
     for the BST/GMT handling). Malformed entries are skipped with a
     warning — we never fail hydration on a single bad bar.
 
-    Returned candles have ``source="REST"`` and ``close_time =
-    snapshot_time + 5 minutes`` (snapshot time is bar-open).
+    ``resolution`` selects the bar duration added to the snapshot
+    (bar-open) timestamp to compute ``close_time``. Defaults to
+    ``"MINUTE_5"`` so legacy M5 callers are byte-identical; Phase B
+    H1 hydration passes ``"HOUR"`` to land close_times on hour
+    boundaries. An unknown resolution raises :class:`ValueError`
+    immediately — silent fall-back to M5 would corrupt the H1
+    buffer in ways the in-place-replace mechanic can't recover from.
     """
+    bar_duration = _resolution_to_duration(resolution)
     out: list[Candle] = []
     prices = raw.get("prices") if isinstance(raw, Mapping) else None
     if not isinstance(prices, list):
@@ -206,7 +262,7 @@ def parse_ig_history(
         return out
     for idx, entry in enumerate(prices):
         try:
-            candle = _parse_history_entry(pair, entry)
+            candle = _parse_history_entry(pair, entry, bar_duration)
         except Exception as exc:
             logger.warning(
                 "parse_ig_history(%s): row %d skipped: %s",
@@ -222,7 +278,7 @@ def parse_ig_history(
 
 
 def _parse_history_entry(
-    pair: str, entry: Mapping[str, Any]
+    pair: str, entry: Mapping[str, Any], bar_duration: timedelta,
 ) -> Optional[Candle]:
     if not isinstance(entry, Mapping):
         return None
@@ -239,7 +295,7 @@ def _parse_history_entry(
         open_time = _parse_ig_timestamp(str(snap_local), is_utc=False)
     if open_time is None:
         return None
-    close_time = open_time + timedelta(minutes=5)
+    close_time = open_time + bar_duration
 
     def _mid(slot: str) -> Optional[float]:
         section = entry.get(slot)
@@ -415,7 +471,7 @@ def hydrate_pair(
         # balloon into a thousand-bar fetch.
         try:
             raw = fetcher(epic, resolution, backfill_bars)
-            fresh_candles = parse_ig_history(pair, raw)
+            fresh_candles = parse_ig_history(pair, raw, resolution=resolution)
             newest_cached_ts = cached[-1].close_time
             rest_bars = [
                 c for c in fresh_candles if c.close_time > newest_cached_ts
@@ -456,7 +512,7 @@ def hydrate_pair(
     else:
         try:
             raw = fetcher(epic, resolution, backfill_bars)
-            rest_bars = parse_ig_history(pair, raw)
+            rest_bars = parse_ig_history(pair, raw, resolution=resolution)
             mode = "rest_only"
         except Exception as exc:
             logger.error(
@@ -515,12 +571,20 @@ def _is_fresh(newest: datetime, now: datetime, freshness_min: int) -> bool:
 
 @dataclass(frozen=True)
 class PairBundle:
-    """Inputs required to hydrate one pair, bundled for the executor."""
+    """Inputs required to hydrate one pair, bundled for the executor.
+
+    ``archive_h1`` / ``buffer_h1`` are populated only when
+    :data:`feed.constants.FEED_H1_HYDRATION_ENABLED` is on. When
+    either is ``None`` the H1 hydration leg is skipped silently for
+    that pair, preserving the legacy M5-only behaviour.
+    """
 
     pair: str
     epic: str
     archive: CandleArchive
     buffer: RollingBuffer
+    archive_h1: Optional[CandleArchive] = None
+    buffer_h1: Optional[RollingBuffer] = None
 
 
 def hydrate_pairs(
@@ -531,12 +595,26 @@ def hydrate_pairs(
     backfill_bars: int = FEED_BACKFILL_BARS,
     freshness_min: int = FEED_FRESHNESS_THRESHOLD_MIN,
     resolution: str = "MINUTE_5",
+    h1_enabled: bool = FEED_H1_HYDRATION_ENABLED,
+    h1_backfill_bars: int = FEED_H1_BACKFILL_BARS,
+    h1_min_usable_bars: int = FEED_H1_MIN_USABLE_BARS,
 ) -> HydrationReport:
     """Hydrate every bundle in parallel and return an aggregate report.
 
     Uses a thread pool sized to ``len(bundles)`` — the bottleneck is
     REST latency, not CPU, so spinning one thread per pair is the
     cleanest way to overlap the calls.
+
+    When ``h1_enabled`` is true *and* a bundle carries both
+    ``buffer_h1`` and ``archive_h1``, a second hydration call is
+    issued for that pair with ``resolution="HOUR"`` and its result is
+    aggregated into :py:attr:`HydrationReport.per_pair_h1`. The H1 leg
+    runs sequentially after the M5 leg for the same pair (so a single
+    pair never burns two REST quota slots in parallel) but H1 legs for
+    different pairs still overlap via the same thread pool.
+
+    ``h1_enabled`` / ``h1_backfill_bars`` / ``h1_min_usable_bars`` are
+    test seams; defaults flow from :py:mod:`feed.constants`.
     """
     started = (now_utc or (lambda: datetime.now(timezone.utc)))()
     if not bundles:
@@ -544,29 +622,90 @@ def hydrate_pairs(
             started_at_utc=started,
             finished_at_utc=started,
             per_pair=(),
+            per_pair_h1=(),
         )
     per_pair: list[PairHydrationReport] = []
-    with ThreadPoolExecutor(max_workers=len(bundles)) as pool:
-        futures = {
-            pool.submit(
-                hydrate_pair,
-                b.pair,
-                b.epic,
-                archive=b.archive,
-                buffer=b.buffer,
-                fetcher=fetcher,
-                now_utc=now_utc,
-                backfill_bars=backfill_bars,
-                freshness_min=freshness_min,
-                resolution=resolution,
-            ): b.pair
-            for b in bundles
-        }
-        for fut in as_completed(futures):
+    per_pair_h1: list[PairHydrationReport] = []
+
+    def _hydrate_one(b: PairBundle) -> tuple[
+        PairHydrationReport, Optional[PairHydrationReport]
+    ]:
+        m5_report = hydrate_pair(
+            b.pair,
+            b.epic,
+            archive=b.archive,
+            buffer=b.buffer,
+            fetcher=fetcher,
+            now_utc=now_utc,
+            backfill_bars=backfill_bars,
+            freshness_min=freshness_min,
+            resolution=resolution,
+        )
+        h1_report: Optional[PairHydrationReport] = None
+        if (
+            h1_enabled
+            and b.buffer_h1 is not None
+            and b.archive_h1 is not None
+        ):
             try:
-                per_pair.append(fut.result())
+                h1_report = hydrate_pair(
+                    b.pair,
+                    b.epic,
+                    archive=b.archive_h1,
+                    buffer=b.buffer_h1,
+                    fetcher=fetcher,
+                    now_utc=now_utc,
+                    backfill_bars=h1_backfill_bars,
+                    freshness_min=freshness_min,
+                    resolution="HOUR",
+                )
             except Exception as exc:
-                pair = futures[fut]
+                # H1 leg must never poison the M5 path. The loop's
+                # dispatcher will fall back to _legacy_h1_from_m5 when
+                # the H1 buffer is short / empty (Commit 2).
+                logger.exception(
+                    "hydrate_pairs: H1 leg for %s raised — falling back "
+                    "to M5-resample", b.pair,
+                )
+                h1_report = PairHydrationReport(
+                    pair=b.pair,
+                    mode="failed",
+                    cached_bars=0,
+                    rest_bars=0,
+                    final_buffer_size=0,
+                    newest_close_time=None,
+                    error=f"H1 leg raised: {exc}",
+                )
+            if (
+                h1_report is not None
+                and h1_report.mode != "failed"
+                and h1_report.final_buffer_size < h1_min_usable_bars
+            ):
+                # R1 in the design doc: new market / illiquid epic
+                # returned fewer than the classifier minimum. The
+                # buffer is still populated; the loop dispatcher will
+                # route to the legacy path until the buffer warms up
+                # via live BAR_CLOSE updates.
+                logger.warning(
+                    "hydrate_pairs: H1 buffer for %s has %d bars "
+                    "(< %d minimum) — dispatcher will use legacy "
+                    "M5-resample fallback until warmed up",
+                    b.pair,
+                    h1_report.final_buffer_size,
+                    h1_min_usable_bars,
+                )
+        return m5_report, h1_report
+
+    with ThreadPoolExecutor(max_workers=len(bundles)) as pool:
+        futures = {pool.submit(_hydrate_one, b): b.pair for b in bundles}
+        for fut in as_completed(futures):
+            pair = futures[fut]
+            try:
+                m5_report, h1_report = fut.result()
+                per_pair.append(m5_report)
+                if h1_report is not None:
+                    per_pair_h1.append(h1_report)
+            except Exception as exc:
                 logger.exception(
                     "hydrate_pairs: pair %s raised unhandled exception", pair,
                 )
@@ -586,6 +725,7 @@ def hydrate_pairs(
         started_at_utc=started,
         finished_at_utc=finished,
         per_pair=tuple(sorted(per_pair, key=lambda r: r.pair)),
+        per_pair_h1=tuple(sorted(per_pair_h1, key=lambda r: r.pair)),
     )
 
 

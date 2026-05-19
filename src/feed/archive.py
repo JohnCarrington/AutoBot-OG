@@ -72,17 +72,28 @@ class CandleArchive:
     Parameters
     ----------
     pair : str
-        Symbol used to build the CSV filename via
-        :data:`FEED_ARCHIVE_CSV_TEMPLATE`.
+        Symbol used to build the CSV filename via ``template``
+        (default :data:`FEED_ARCHIVE_CSV_TEMPLATE`).
     base_dir : str | Path, optional
         Override the default :data:`FEED_ARCHIVE_DIR` — useful in
         tests with ``tmp_path``.
+    template : str, optional
+        Filename template with a single ``{pair}`` placeholder.
+        Defaults to the M5 template; the Phase B H1 archive passes
+        :data:`FEED_ARCHIVE_CSV_TEMPLATE_H1` so the two timeframes
+        coexist under the same ``base_dir`` without collisions.
     """
 
-    def __init__(self, pair: str, base_dir: Optional[str | Path] = None) -> None:
+    def __init__(
+        self,
+        pair: str,
+        base_dir: Optional[str | Path] = None,
+        *,
+        template: str = FEED_ARCHIVE_CSV_TEMPLATE,
+    ) -> None:
         self._pair = pair
         self._base_dir = Path(base_dir) if base_dir is not None else Path(FEED_ARCHIVE_DIR)
-        self._path = self._base_dir / FEED_ARCHIVE_CSV_TEMPLATE.format(pair=pair)
+        self._path = self._base_dir / template.format(pair=pair)
         self._last_ts: Optional[int] = None
         # Eagerly read the last timestamp on construction so the first
         # append() correctly dedupes even before any load() call.

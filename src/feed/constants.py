@@ -126,6 +126,36 @@ LIGHTSTREAMER_ENDPOINT_BY_ACC: dict[str, str] = {
 FEED_ARCHIVE_DIR: str = _s("FEED_ARCHIVE_DIR", "data/candles")
 FEED_ARCHIVE_CSV_TEMPLATE: str = "{pair}_5m.csv"
 
+# H1 archive uses the same dir + schema; only the filename suffix
+# differs so an operator can `ls data/candles/` and tell M5 from H1
+# at a glance. CandleArchive accepts a custom template via its
+# ``template=`` constructor arg — see Phase B Commit 1.
+FEED_ARCHIVE_CSV_TEMPLATE_H1: str = "{pair}_1h.csv"
+
+
+# --- H1 hydration (Phase B) -------------------------------------------------
+# Independent H1 backfill so the regime classifier (EMA-50 + 10-bar
+# slope = 60 H1 bars minimum) is non-TRANSITION from the first live
+# BAR_CLOSE. Flag-gated; default OFF so the M5-resample fallback
+# remains the active path until ops verifies parity per the design
+# doc §7.2.
+FEED_H1_HYDRATION_ENABLED: bool = _i("FEED_H1_HYDRATION_ENABLED", 0) != 0
+
+# Per-pair H1 REST budget (bars fetched on cold start). 72 = 60
+# classifier minimum + 12 headroom. Sits well inside the per-pair
+# ~120-bar ceiling the design doc constrains us to.
+FEED_H1_BACKFILL_BARS: int = _i("FEED_H1_BACKFILL_BARS", 72)
+
+# RollingBuffer capacity for the H1 buffer. Matches the backfill
+# budget so a cold start fills the buffer exactly. Hard floor 60
+# enforced at FeedManager construction.
+FEED_H1_BUFFER_CAPACITY: int = _i("FEED_H1_BUFFER_CAPACITY", 72)
+
+# Below this count the bot loop falls back to the legacy
+# M5-resample H1 derivation, even when the flag is on. Protects the
+# new-market / illiquid-epic case (R1 in the design doc risk scan).
+FEED_H1_MIN_USABLE_BARS: int = _i("FEED_H1_MIN_USABLE_BARS", 60)
+
 # Schema written to every archive CSV. ``close_time`` is the ISO-8601
 # UTC string ("2026-05-15T13:00:00+00:00"); ``close_time_ms`` is the
 # integer epoch-milliseconds copy used by the file-tail dedup check
@@ -160,11 +190,16 @@ MARKET_HOURS_GUARDS: dict[str, tuple[int, int]] = {
 __all__ = [
     "FEED_ARCHIVE_COLUMNS",
     "FEED_ARCHIVE_CSV_TEMPLATE",
+    "FEED_ARCHIVE_CSV_TEMPLATE_H1",
     "FEED_ARCHIVE_DIR",
     "FEED_BACKFILL_BARS",
     "FEED_BUFFER_CAPACITY",
     "FEED_FRESHNESS_THRESHOLD_MIN",
     "FEED_GAP_FILL_WINDOW_MIN",
+    "FEED_H1_BACKFILL_BARS",
+    "FEED_H1_BUFFER_CAPACITY",
+    "FEED_H1_HYDRATION_ENABLED",
+    "FEED_H1_MIN_USABLE_BARS",
     "FEED_MIN_USABLE_BARS",
     "FEED_WATCHDOG_STALE_SEC",
     "LIGHTSTREAMER_CANDLE_FIELDS",

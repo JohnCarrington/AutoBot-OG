@@ -95,6 +95,57 @@ def test_parse_ig_history_no_prices_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# parse_ig_history — resolution-aware close_time (Phase B parser fix)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_ig_history_default_resolution_is_m5() -> None:
+    """No-arg call must keep the legacy M5 cadence — protects 1157 baseline."""
+    raw = _ig_payload(n=2)
+    candles = parse_ig_history("GBPUSD", raw)
+    # Two adjacent bars must be exactly 5 minutes apart at close_time.
+    assert candles[1].close_time - candles[0].close_time == timedelta(minutes=5)
+
+
+def test_parse_ig_history_hour_resolution_produces_hour_closes() -> None:
+    """resolution='HOUR' must produce close_time = open + 1h.
+
+    Before the Phase B fix this was hardcoded to +5min, which would
+    have put H1 bars at 5 minutes past the hour and broken the
+    in-place-replace mechanic in the bot loop's BAR_CLOSE handler.
+    """
+    open_t = datetime(2026, 5, 15, 9, 0, tzinfo=timezone.utc)
+    raw = {
+        "prices": [
+            {
+                "snapshotTimeUTC": open_t.strftime("%Y-%m-%dT%H:%M:%S"),
+                "openPrice":  {"bid": 1.30, "ask": 1.30002},
+                "highPrice":  {"bid": 1.30100, "ask": 1.30102},
+                "lowPrice":   {"bid": 1.29950, "ask": 1.29952},
+                "closePrice": {"bid": 1.30050, "ask": 1.30052},
+                "lastTradedVolume": 1000,
+            }
+        ]
+    }
+    candles = parse_ig_history("GBPUSD", raw, resolution="HOUR")
+    assert len(candles) == 1
+    # Close exactly on the next hour boundary, not 5 minutes past.
+    assert candles[0].close_time == open_t + timedelta(hours=1)
+    assert candles[0].close_time.minute == 0
+    assert candles[0].close_time.second == 0
+
+
+def test_parse_ig_history_unknown_resolution_raises() -> None:
+    """Unknown resolution must fail loudly rather than silently fall back.
+
+    A silent default would produce wrong-cadence candles that the
+    H1 buffer's in-place-replace mechanic cannot recover from.
+    """
+    with pytest.raises(ValueError, match="unknown IG resolution"):
+        parse_ig_history("GBPUSD", {"prices": []}, resolution="NOPE")
+
+
+# ---------------------------------------------------------------------------
 # hydrate_pair — three modes + failure
 # ---------------------------------------------------------------------------
 
