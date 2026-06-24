@@ -1,7 +1,7 @@
-"""EMA Continuation strategy (TREND regime) — Phase 11 rewrite.
+"""EMA Pullback strategy (BIG_NEWS_DAY / PRE_BIG_NEWS) — clean-swap step 2b.
 
 The strategy reads :class:`StructureState` and applies the spec §13
-EMA-Continuation gates. The old "wick-touches-EMA50 + reclaim + bullish-
+EMA-Pullback gates. The old "wick-touches-EMA50 + reclaim + bullish-
 bodied confirmation" 3-bar pattern is gone; the Structure Engine's
 ``current_reaction`` (acceptance break / failed reclaim) plus
 ``structure_mode == TREND_CONTINUATION`` carry the same intent.
@@ -9,18 +9,19 @@ bodied confirmation" 3-bar pattern is gone; the Structure Engine's
 Gates (spec §13)
 ----------------
 SELL:
-    - ``regime == TREND`` (dispatcher enforces)
     - ``htf_bias == BEARISH``
     - ``structure_mode == TREND_CONTINUATION``
     - ``current_reaction in (FAILED_RECLAIM_BELOW_SUPPORT,
       SUPPORT_ACCEPTANCE_BREAK)``
 
 BUY:
-    - ``regime == TREND``
     - ``htf_bias == BULLISH``
     - ``structure_mode == TREND_CONTINUATION``
     - ``current_reaction in (FAILED_RECLAIM_ABOVE_RESISTANCE,
       RESISTANCE_ACCEPTANCE_BREAK)``
+
+The dispatcher routes this detector on ``DayType.BIG_NEWS_DAY`` and
+``DayType.PRE_BIG_NEWS`` days.
 
 SL/TP
 -----
@@ -38,8 +39,7 @@ import pandas as pd
 
 from config.pair_config import MIN_SL_PIPS, pip_size_for, price_to_pips
 from day_type import DayType
-from regime.labels import Direction, RegimeLabel
-from regime.state import RegimeState
+from regime.labels import Direction
 from structure_engine import StructureLevel, StructureState
 
 from .constants import (
@@ -50,7 +50,7 @@ from .constants import (
 from .signal import Signal, compute_invalid_after
 
 
-_STRATEGY_NAME = "ema_continuation"
+_STRATEGY_NAME = "ema_pullback"
 
 _BEARISH_REACTIONS = frozenset(
     {"FAILED_RECLAIM_BELOW_SUPPORT", "SUPPORT_ACCEPTANCE_BREAK"}
@@ -60,17 +60,15 @@ _BULLISH_REACTIONS = frozenset(
 )
 
 
-def detect_ema_continuation(
+def detect_ema_pullback(
     df_m5: pd.DataFrame,
     df_h1: pd.DataFrame,
-    regime_state: RegimeState,
+    day_type: DayType,
     structure_state: StructureState,
     pair: str,
     current_time: datetime,  # noqa: ARG001 — kept for dispatcher uniformity
 ) -> Optional[Signal]:
-    """Return a Signal for a TREND continuation, else ``None``."""
-    if regime_state.get("current_regime") != RegimeLabel.TREND.value:
-        return None
+    """Return a Signal for an EMA pullback continuation, else ``None``."""
     if not structure_state.is_valid:
         return None
     if structure_state.structure_mode != "TREND_CONTINUATION":
@@ -125,9 +123,7 @@ def detect_ema_continuation(
     return Signal(
         pair=pair.upper(),
         direction=direction,
-        # 2a bridge: placeholder day-type until 2b wires the dispatcher's
-        # day-type input to the strategy. 2b removes this placeholder.
-        day_type=DayType.NORMAL,
+        day_type=day_type,
         strategy_name=_STRATEGY_NAME,
         suggested_entry_price=entry_price,
         suggested_sl_price=sl_price,
@@ -206,4 +202,4 @@ def _safe_float(value) -> float:
         return float("nan")
 
 
-__all__ = ["detect_ema_continuation"]
+__all__ = ["detect_ema_pullback"]

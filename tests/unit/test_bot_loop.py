@@ -560,7 +560,7 @@ def test_force_close_order_executes_close(monkeypatch) -> None:
     pos = ExecutionPosition(
         deal_id="D1", deal_reference="R1", pair="GBPUSD",
         direction=Direction.BULLISH, day_type_at_entry=RegimeLabel.TREND,
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         size_units=1.0, entry_price=1.30, initial_sl_price=1.298,
         current_sl_price=1.298, suggested_tp_price=None,
         entry_time_utc=_NOW, signal_source_candle_ts=_NOW,
@@ -591,7 +591,7 @@ def test_force_close_passes_position_own_direction_bullish(monkeypatch) -> None:
     pieces["positions"].upsert(ExecutionPosition(
         deal_id="D_BULL", deal_reference="R", pair="GBPUSD",
         direction=Direction.BULLISH, day_type_at_entry=RegimeLabel.TREND,
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         size_units=1.0, entry_price=1.30, initial_sl_price=1.298,
         current_sl_price=1.298, suggested_tp_price=None,
         entry_time_utc=_NOW, signal_source_candle_ts=_NOW,
@@ -618,7 +618,7 @@ def test_force_close_passes_position_own_direction_bearish(monkeypatch) -> None:
     pieces["positions"].upsert(ExecutionPosition(
         deal_id="D_BEAR", deal_reference="R", pair="GBPUSD",
         direction=Direction.BEARISH, day_type_at_entry=RegimeLabel.TREND,
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         size_units=1.0, entry_price=1.30, initial_sl_price=1.302,
         current_sl_price=1.302, suggested_tp_price=None,
         entry_time_utc=_NOW, signal_source_candle_ts=_NOW,
@@ -786,7 +786,7 @@ def test_risk_guard_routes_to_correct_pair_engine(monkeypatch) -> None:
         pair="GBPUSD",
         direction=Direction.BULLISH,
         day_type=DayType.NORMAL,
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         suggested_entry_price=1.3,
         suggested_sl_price=1.298,
         suggested_tp_price=None,

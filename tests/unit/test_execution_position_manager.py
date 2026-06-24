@@ -24,7 +24,7 @@ def _pos(deal_id: str = "D1", **overrides) -> ExecutionPosition:
         pair="GBPUSD",
         direction=Direction.BULLISH,
         day_type_at_entry=DayType.NORMAL,
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         size_units=1.0,
         entry_price=1.30000,
         initial_sl_price=1.29850,
@@ -79,18 +79,18 @@ def test_for_pair_returns_matching_positions(tmp_path: Path) -> None:
 def test_by_signal_source_lookup_hits(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     src = _TS + timedelta(minutes=5)
-    p = _pos("D1", signal_source_candle_ts=src, strategy_name="bb_reclaim")
+    p = _pos("D1", signal_source_candle_ts=src, strategy_name="bb_bounce")
     mgr.upsert(p)
-    got = mgr.by_signal_source("GBPUSD", "bb_reclaim", src)
+    got = mgr.by_signal_source("GBPUSD", "bb_bounce", src)
     assert got is not None and got.deal_id == "D1"
 
 
 def test_by_signal_source_lookup_misses_on_different_strategy(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
     src = _TS + timedelta(minutes=5)
-    p = _pos("D1", signal_source_candle_ts=src, strategy_name="bb_reclaim")
+    p = _pos("D1", signal_source_candle_ts=src, strategy_name="bb_bounce")
     mgr.upsert(p)
-    got = mgr.by_signal_source("GBPUSD", "ema_continuation", src)
+    got = mgr.by_signal_source("GBPUSD", "ema_pullback", src)
     assert got is None
 
 
@@ -99,7 +99,7 @@ def test_by_signal_source_lookup_misses_on_different_ts(tmp_path: Path) -> None:
     p = _pos("D1", signal_source_candle_ts=_TS)
     mgr.upsert(p)
     other_ts = _TS + timedelta(minutes=5)
-    got = mgr.by_signal_source("GBPUSD", "ema_continuation", other_ts)
+    got = mgr.by_signal_source("GBPUSD", "ema_pullback", other_ts)
     assert got is None
 
 
@@ -136,7 +136,7 @@ def test_remove_missing_returns_none(tmp_path: Path) -> None:
 
 def test_upsert_replacement_refreshes_indices(tmp_path: Path) -> None:
     mgr = _mgr(tmp_path)
-    p = _pos("D1", pair="GBPUSD", strategy_name="bb_reclaim")
+    p = _pos("D1", pair="GBPUSD", strategy_name="bb_bounce")
     mgr.upsert(p)
     # Same deal_id but updated SL.
     updated = p.with_changes(current_sl_price=1.30010, be_moved=True)

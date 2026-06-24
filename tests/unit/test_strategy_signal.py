@@ -17,7 +17,7 @@ def _signal(
     pair: str = "GBPUSD",
     direction: Direction = Direction.BULLISH,
     day_type: DayType = DayType.NORMAL,
-    strategy_name: str = "bb_reclaim",
+    strategy_name: str = "bb_bounce",
     suggested_entry_price: float = 1.30000,
     suggested_sl_price: float = 1.29850,
     suggested_tp_price: float | None = 1.30200,

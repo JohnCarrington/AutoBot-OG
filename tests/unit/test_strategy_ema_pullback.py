@@ -1,14 +1,13 @@
-"""Tests for the Phase 11 EMA Continuation strategy rewrite."""
+"""Tests for the EMA Pullback strategy (clean-swap step 2b)."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
-import pytest
 
 from day_type import DayType
-from regime.labels import Direction, RegimeLabel
-from strategies.ema_continuation import detect_ema_continuation
+from regime.labels import Direction
+from strategies.ema_pullback import detect_ema_pullback
 from structure_engine import StructureLevel, StructureState
 
 
@@ -35,18 +34,6 @@ def _m5(close: float = 1.30050, atr: float = 0.0020) -> pd.DataFrame:
 
 def _h1(*, macd_hist: float = -0.10) -> pd.DataFrame:
     return pd.DataFrame([{"macd_hist_12_26_9": macd_hist}])
-
-
-def _state(regime: str = "TREND", direction: str | None = "BEARISH") -> dict:
-    return {
-        "current_regime": regime,
-        "current_direction": direction,
-        "pending_regime": None,
-        "m5_confirmation_count": 0,
-        "last_regime_change_time": None,
-        "reason": "test",
-        "debug": {},
-    }
 
 
 def _level(side: str, price: float, score: float = 7.0) -> StructureLevel:
@@ -94,26 +81,27 @@ def _structure(
     )
 
 
-def test_bearish_acceptance_break_emits_sell() -> None:
-    sig = detect_ema_continuation(
+def test_bearish_acceptance_break_emits_sell_on_big_news_day() -> None:
+    sig = detect_ema_pullback(
         df_m5=_m5(),
         df_h1=_h1(macd_hist=-0.10),
-        regime_state=_state(),
+        day_type=DayType.BIG_NEWS_DAY,
         structure_state=_structure(),
         pair=_PAIR,
         current_time=_NOW,
     )
     assert sig is not None
     assert sig.direction is Direction.BEARISH
-    assert sig.day_type is DayType.NORMAL
+    assert sig.day_type is DayType.BIG_NEWS_DAY
+    assert sig.strategy_name == "ema_pullback"
     assert sig.suggested_tp_price is None
 
 
-def test_bullish_failed_reclaim_above_resistance_emits_buy() -> None:
-    sig = detect_ema_continuation(
+def test_bullish_failed_reclaim_emits_buy_on_pre_big_news() -> None:
+    sig = detect_ema_pullback(
         df_m5=_m5(),
         df_h1=_h1(macd_hist=0.10),
-        regime_state=_state(direction="BULLISH"),
+        day_type=DayType.PRE_BIG_NEWS,
         structure_state=_structure(
             htf_bias="BULLISH",
             reaction="FAILED_RECLAIM_ABOVE_RESISTANCE",
@@ -123,25 +111,14 @@ def test_bullish_failed_reclaim_above_resistance_emits_buy() -> None:
     )
     assert sig is not None
     assert sig.direction is Direction.BULLISH
-
-
-def test_wrong_regime_returns_none() -> None:
-    sig = detect_ema_continuation(
-        df_m5=_m5(),
-        df_h1=_h1(),
-        regime_state=_state(regime="RANGE"),
-        structure_state=_structure(),
-        pair=_PAIR,
-        current_time=_NOW,
-    )
-    assert sig is None
+    assert sig.day_type is DayType.PRE_BIG_NEWS
 
 
 def test_non_trend_continuation_mode_returns_none() -> None:
-    sig = detect_ema_continuation(
+    sig = detect_ema_pullback(
         df_m5=_m5(),
         df_h1=_h1(),
-        regime_state=_state(),
+        day_type=DayType.BIG_NEWS_DAY,
         structure_state=_structure(mode="RANGE_BALANCE"),
         pair=_PAIR,
         current_time=_NOW,
@@ -150,10 +127,10 @@ def test_non_trend_continuation_mode_returns_none() -> None:
 
 
 def test_htf_neutral_returns_none() -> None:
-    sig = detect_ema_continuation(
+    sig = detect_ema_pullback(
         df_m5=_m5(),
         df_h1=_h1(),
-        regime_state=_state(),
+        day_type=DayType.BIG_NEWS_DAY,
         structure_state=_structure(htf_bias="NEUTRAL"),
         pair=_PAIR,
         current_time=_NOW,
@@ -163,10 +140,10 @@ def test_htf_neutral_returns_none() -> None:
 
 def test_wrong_reaction_for_bias_returns_none() -> None:
     """BEARISH HTF + RESISTANCE_ACCEPTANCE_BREAK is a mismatch."""
-    sig = detect_ema_continuation(
+    sig = detect_ema_pullback(
         df_m5=_m5(),
         df_h1=_h1(),
-        regime_state=_state(),
+        day_type=DayType.BIG_NEWS_DAY,
         structure_state=_structure(
             htf_bias="BEARISH",
             reaction="RESISTANCE_ACCEPTANCE_BREAK",
@@ -178,10 +155,10 @@ def test_wrong_reaction_for_bias_returns_none() -> None:
 
 
 def test_invalid_state_returns_none() -> None:
-    sig = detect_ema_continuation(
+    sig = detect_ema_pullback(
         df_m5=_m5(),
         df_h1=_h1(),
-        regime_state=_state(),
+        day_type=DayType.BIG_NEWS_DAY,
         structure_state=_structure(is_valid=False),
         pair=_PAIR,
         current_time=_NOW,

@@ -22,7 +22,7 @@ def _pos(**overrides) -> ExecutionPosition:
         pair="GBPUSD",
         direction=Direction.BULLISH,
         day_type_at_entry=RegimeLabel.TREND,
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         size_units=1.0,
         entry_price=1.30000,
         initial_sl_price=1.29850,  # 15p risk
@@ -114,11 +114,11 @@ def _trail_bars(*, swing_low: float, swing_high: float, ema20: float) -> pd.Data
 
 
 def test_trail_picks_conservative_long_swing_primary() -> None:
-    # ema_continuation → swing primary. LONG conservative = higher value.
+    # ema_pullback → swing primary. LONG conservative = higher value.
     # Swing low at 1.29960 (10p below entry), EMA20 at 1.30020 (just above entry).
     # Both are valid trail candidates (below current price 1.30100); conservative = 1.30020.
     p = _pos(
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30010,  # BE level
@@ -126,7 +126,7 @@ def test_trail_picks_conservative_long_swing_primary() -> None:
     df = _trail_bars(swing_low=1.29960, swing_high=1.30200, ema20=1.30020)
     amend = evaluate_sl_amend(p, df, current_price=1.30100)
     assert amend is not None
-    # Conservative for ema_continuation is whichever is closer to price.
+    # Conservative for ema_pullback is whichever is closer to price.
     # primary (swing) = 1.29960; secondary (ema20) = 1.30020.
     # LONG conservative (max) = 1.30020.
     assert amend.new_sl_price == pytest.approx(1.30020)
@@ -135,7 +135,7 @@ def test_trail_picks_conservative_long_swing_primary() -> None:
 
 def test_trail_picks_swing_when_higher_than_ema20() -> None:
     p = _pos(
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30010,
@@ -149,9 +149,9 @@ def test_trail_picks_swing_when_higher_than_ema20() -> None:
 
 
 def test_trail_short_picks_min_candidate() -> None:
-    # SHORT: bb_reclaim — ema20 primary, swing secondary. Conservative = min.
+    # SHORT: bb_bounce — ema20 primary, swing secondary. Conservative = min.
     p = _pos(
-        strategy_name="bb_reclaim",
+        strategy_name="bb_bounce",
         direction=Direction.BEARISH,
         entry_price=1.30000,
         initial_sl_price=1.30150,
@@ -179,7 +179,7 @@ def test_trail_short_picks_min_candidate() -> None:
 def test_trail_rejects_ema20_on_wrong_side_long() -> None:
     # EMA20 above current price on a LONG — not a valid candidate.
     p = _pos(
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30010,
@@ -194,7 +194,7 @@ def test_trail_rejects_ema20_on_wrong_side_long() -> None:
 
 def test_trail_never_widens() -> None:
     p = _pos(
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30050,  # already tighter than candidates below
@@ -206,7 +206,7 @@ def test_trail_never_widens() -> None:
 
 def test_trail_requires_min_delta() -> None:
     p = _pos(
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30020,
@@ -234,7 +234,7 @@ def test_trail_empty_dataframe_returns_none() -> None:
 
 def test_trail_with_no_swing_data_falls_back_to_ema20() -> None:
     p = _pos(
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30010,

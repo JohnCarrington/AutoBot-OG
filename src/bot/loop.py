@@ -89,6 +89,8 @@ from risk.types import (
     MarketSnapshot,
     OpenPosition,
 )
+from day_type import classify_day_type
+from risk.rules.news_blackout import _currencies_for as _currencies_for_pair
 from strategies.dispatcher import detect_all_setups
 from strategies.signal import Signal
 from structure import add_fractal_swings
@@ -843,7 +845,7 @@ class BotLoop:
         (e.g. 13:35) the resample produces an H1 bar labelled 14:00
         with only 7 of the expected 12 M5 contributions. ``dropna()``
         does not remove it — every OHLC slot is populated. Strategies
-        gating on H1 indicators (`bb_reclaim`, `ema_continuation`)
+        gating on H1 indicators (`bb_bounce`, `ema_pullback`)
         would then see a value that recomputes on every M5 tick,
         breaking the per-H1-bar stability the strategies assume.
         Fix: drop the trailing forming H1 unless the M5 close that
@@ -1262,22 +1264,17 @@ class BotLoop:
         df_h1: pd.DataFrame,
         structure_state,
     ) -> None:
-        engine = self._pair_state[pair].regime_engine
-        if not engine.is_live():
-            # regime in TRANSITION — strategies don't fire
-            state = engine.get_state()
-            logger.info(
-                "signal pipeline skipped for %s: regime not live "
-                "(current=%s direction=%s reason=%s)",
-                pair, state.get("current_regime"),
-                state.get("current_direction"), state.get("reason"),
-            )
-            return
+        # 2b: the dispatcher is now keyed on day_type, not regime. The
+        # per-pair regime engine stays around for 2c/2d consumers (EOD
+        # carve-out, risk rules) — only the dispatcher input changes
+        # here.
         now = self._clock()
+        currencies = _currencies_for_pair(pair)
+        day_type = classify_day_type(now_utc=now, currencies=currencies)
         signals = detect_all_setups(
             df_m5=df_m5,
             df_h1=df_h1,
-            regime_state=engine.get_state(),
+            day_type=day_type,
             structure_state=structure_state,
             pair=pair,
             current_time=now,

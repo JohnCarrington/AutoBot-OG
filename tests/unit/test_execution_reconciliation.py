@@ -34,7 +34,7 @@ def _pos(
         pair=pair,
         direction=Direction.BULLISH,
         day_type_at_entry=RegimeLabel.TREND,
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         size_units=1.0,
         entry_price=1.30000,
         initial_sl_price=1.29850,

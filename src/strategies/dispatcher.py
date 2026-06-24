@@ -1,82 +1,131 @@
-"""Regime → strategy dispatcher.
+"""Day-type → strategy dispatcher.
 
-A thin selector that calls the single strategy whose regime gate
-matches the engine's current regime. Returns a list (length 0 or 1
-in v1) so future multi-pair / multi-signal extensions can add entries
-without breaking callers.
+Clean-swap step 2b: replaces the regime-based router with a day-type
+dispatch table. The day_type comes from
+:py:func:`day_type.classify_day_type`, computed once per BAR_CLOSE
+upstream in ``bot.loop``.
 
-Phase 11 update — the dispatcher signature now threads a
-:class:`StructureState` through to each strategy. Strategies read it
-in place of doing their own pattern detection (spec §13 gates).
+Dispatch table
+--------------
+- ``DayType.BIG_NEWS_DAY`` → detect_news + detect_structure_break + detect_ema_pullback
+- ``DayType.PRE_BIG_NEWS`` → detect_structure_break + detect_ema_pullback
+- ``DayType.NORMAL``       → detect_bb_bounce
+
+``detect_news`` (step 3) and ``detect_structure_break`` (step 5) do
+not exist yet; for THIS step they are wired as local stub detectors
+that always return ``None``. The table is complete so future steps
+can drop in the real detectors without touching the dispatcher
+shape.
+
+Multi-signal returns
+--------------------
+Each detector returns ``Optional[Signal]``; the dispatcher collects
+non-``None`` returns into a ``list[Signal]``. Unlike the prior
+regime-router (which routed to a single eligible strategy), a
+day-type can fan out to multiple detectors — BIG_NEWS_DAY runs all
+three of news/structure-break/ema-pullback.
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Callable, Optional
 
 import pandas as pd
 
-from regime.labels import RegimeLabel
-from regime.state import RegimeState
+from day_type import DayType
 from structure_engine import StructureState
 
-from .bb_reclaim import detect_bb_reclaim
-from .ema_continuation import detect_ema_continuation
-from .liquidity_sweep import detect_liquidity_sweep
+from .bb_bounce import detect_bb_bounce
+from .ema_pullback import detect_ema_pullback
 from .signal import Signal
 
 
 logger = logging.getLogger(__name__)
 
 
+# TODO step-3: replace with the real detect_news implementation.
+def detect_news(
+    df_m5: pd.DataFrame,  # noqa: ARG001 — stub
+    df_h1: pd.DataFrame,  # noqa: ARG001 — stub
+    day_type: DayType,  # noqa: ARG001 — stub
+    structure_state: StructureState,  # noqa: ARG001 — stub
+    pair: str,  # noqa: ARG001 — stub
+    current_time: datetime,  # noqa: ARG001 — stub
+) -> Optional[Signal]:
+    """Stub detector — step 3 will land the real news strategy."""
+    return None
+
+
+# TODO step-5: replace with the real detect_structure_break implementation.
+def detect_structure_break(
+    df_m5: pd.DataFrame,  # noqa: ARG001 — stub
+    df_h1: pd.DataFrame,  # noqa: ARG001 — stub
+    day_type: DayType,  # noqa: ARG001 — stub
+    structure_state: StructureState,  # noqa: ARG001 — stub
+    pair: str,  # noqa: ARG001 — stub
+    current_time: datetime,  # noqa: ARG001 — stub
+) -> Optional[Signal]:
+    """Stub detector — step 5 will land the real structure-break strategy."""
+    return None
+
+
+Detector = Callable[
+    [pd.DataFrame, pd.DataFrame, DayType, StructureState, str, datetime],
+    Optional[Signal],
+]
+
+
+DISPATCH: dict[DayType, tuple[Detector, ...]] = {
+    DayType.BIG_NEWS_DAY: (detect_news, detect_structure_break, detect_ema_pullback),
+    DayType.PRE_BIG_NEWS: (detect_structure_break, detect_ema_pullback),
+    DayType.NORMAL: (detect_bb_bounce,),
+}
+
+
 def detect_all_setups(
+    *,
     df_m5: pd.DataFrame,
     df_h1: pd.DataFrame,
-    regime_state: RegimeState,
+    day_type: DayType,
     structure_state: StructureState,
     pair: str,
     current_time: datetime,
 ) -> list[Signal]:
-    """Return signals from the strategy matching ``regime_state``.
+    """Return signals from every detector mapped to ``day_type``.
 
-    Routing (unchanged):
-
-    - ``RANGE``      → :py:func:`detect_bb_reclaim`
-    - ``TREND``      → :py:func:`detect_ema_continuation`
-    - ``VOLATILE``   → :py:func:`detect_liquidity_sweep`
-    - ``TRANSITION`` → ``[]`` (nothing trades during a transition)
-
-    Each strategy applies its spec §13 gates against ``structure_state``;
-    the matrix is total and unambiguous — there is never more than one
-    eligible strategy in v1.
+    The day-type table maps each ``DayType`` to a tuple of detectors.
+    Each detector is called with the full input set and a non-``None``
+    return is collected into the result list.
     """
-    current = regime_state.get("current_regime")
-    if current == RegimeLabel.RANGE.value:
-        result = detect_bb_reclaim(
-            df_m5, df_h1, regime_state, structure_state, pair, current_time
-        )
-    elif current == RegimeLabel.TREND.value:
-        result = detect_ema_continuation(
-            df_m5, df_h1, regime_state, structure_state, pair, current_time
-        )
-    elif current == RegimeLabel.VOLATILE.value:
-        result = detect_liquidity_sweep(
-            df_m5, df_h1, regime_state, structure_state, pair, current_time
-        )
-    else:
+    detectors = DISPATCH.get(day_type, ())
+    if not detectors:
         logger.info(
-            "no setups for %s: regime=%s (no matching strategy route)",
-            pair, current,
+            "no setups for %s: day_type=%s has no detectors mapped",
+            pair, day_type,
         )
         return []
 
-    if result is None:
-        logger.info(
-            "no setups for %s: regime=%s strategy gates rejected this bar",
-            pair, current,
+    signals: list[Signal] = []
+    for detector in detectors:
+        result = detector(
+            df_m5, df_h1, day_type, structure_state, pair, current_time,
         )
-        return []
-    return [result]
+        if result is not None:
+            signals.append(result)
+
+    if not signals:
+        logger.info(
+            "no setups for %s: day_type=%s — %d detector(s) ran, all returned None",
+            pair, day_type, len(detectors),
+        )
+    return signals
 
 
-__all__ = ["detect_all_setups"]
+__all__ = [
+    "DISPATCH",
+    "Detector",
+    "detect_all_setups",
+    "detect_news",
+    "detect_structure_break",
+]

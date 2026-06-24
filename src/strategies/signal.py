@@ -20,9 +20,20 @@ from regime.labels import Direction
 from .constants import M5_BAR_MINUTES
 
 
-StrategyName = Literal["bb_reclaim", "ema_continuation", "liquidity_sweep"]
+StrategyName = Literal[
+    "bb_bounce",
+    "ema_pullback",
+    "news",
+    "structure_break",
+]
 """Closed set of strategy names. Downstream consumers can switch on these
-values with static-type guarantees."""
+values with static-type guarantees.
+
+Step 2b: ``bb_reclaim`` / ``ema_continuation`` were renamed to
+``bb_bounce`` / ``ema_pullback`` and ``liquidity_sweep`` was deleted.
+``news`` (step 3) and ``structure_break`` (step 5) are reserved here so
+the dispatcher's stubs and the eventual real detectors can emit
+Signals without revisiting this Literal."""
 
 
 @dataclass(frozen=True)
@@ -46,14 +57,13 @@ class Signal:
         The day-type under which this setup was detected. Used by
         downstream consumers to disambiguate strategy intent
         (TREND positions can hold overnight Mon-Thu; RANGE/VOLATILE
-        cannot — see ``risk/rules/eod_enforcement.py``). (2a: field
-        renamed from ``regime: RegimeLabel`` to ``day_type: DayType``.
-        Strategies currently populate ``DayType.NORMAL`` as a placeholder
-        — 2b wires the real day-type via the dispatcher. The legacy
+        cannot — see ``risk/rules/eod_enforcement.py``). 2b wired the
+        real day-type via the dispatcher — strategies receive it as a
+        parameter and emit it verbatim on the Signal. The legacy
         regime-based EOD carve-out remains in eod_enforcement.py until
         2c — strategy-pipeline tests that exercise EOD still construct
         ``ExecutionPosition`` with explicit regime values to drive that
-        carve-out.)
+        carve-out.
     strategy_name : StrategyName
         Identifier for the strategy that produced the signal.
     suggested_entry_price : float

@@ -125,7 +125,7 @@ def _ig_signal(**overrides) -> Signal:
         pair="GBPUSD",
         direction=Direction.BULLISH,
         day_type=DayType.NORMAL,
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         suggested_entry_price=1.30000,
         suggested_sl_price=1.29850,
         suggested_tp_price=None,

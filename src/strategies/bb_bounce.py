@@ -1,9 +1,9 @@
-"""Bollinger Reclaim strategy (RANGE regime) — Phase 11 rewrite.
+"""BB Bounce strategy (NORMAL day-type) — clean-swap step 2b rewrite.
 
-The strategy is now a **thin wrapper** over :class:`StructureState`:
-the Structure Engine identifies the support / resistance zones and
+The strategy is a **thin wrapper** over :class:`StructureState`: the
+Structure Engine identifies the support / resistance zones and
 classifies the current reaction; this module's job is to check the
-spec §13 BB-Reclaim gates and emit a Signal when they line up.
+spec §13 BB-Bounce gates and emit a Signal when they line up.
 
 Gates (spec §13)
 ----------------
@@ -17,8 +17,8 @@ SHORT:
     - ``nearest_resistance.score >= STRONG_LEVEL_THRESHOLD``
     - ``current_reaction in (RESISTANCE_REJECTION, RESISTANCE_SWEEP_RECLAIM)``
 
-The dispatcher also enforces ``regime == RANGE`` before calling this
-function — RANGE remains the Phase 3 regime that routes here.
+The dispatcher only calls this detector on ``DayType.NORMAL`` days, so
+no in-detector day-type gate is needed beyond the dispatcher routing.
 
 SL/TP
 -----
@@ -38,8 +38,7 @@ import pandas as pd
 
 from config.pair_config import MIN_SL_PIPS, pip_size_for, price_to_pips
 from day_type import DayType
-from regime.labels import Direction, RegimeLabel
-from regime.state import RegimeState
+from regime.labels import Direction
 from structure_engine import StructureLevel, StructureState
 from structure_engine.constants import STRONG_LEVEL_THRESHOLD
 
@@ -51,28 +50,29 @@ from .constants import (
 from .signal import Signal, compute_invalid_after
 
 
-_STRATEGY_NAME = "bb_reclaim"
+_STRATEGY_NAME = "bb_bounce"
 
 _LONG_REACTIONS = frozenset({"SUPPORT_REJECTION", "SUPPORT_SWEEP_RECLAIM"})
 _SHORT_REACTIONS = frozenset({"RESISTANCE_REJECTION", "RESISTANCE_SWEEP_RECLAIM"})
 
 
-def detect_bb_reclaim(
+def detect_bb_bounce(
     df_m5: pd.DataFrame,
     df_h1: pd.DataFrame,
-    regime_state: RegimeState,
+    day_type: DayType,
     structure_state: StructureState,
     pair: str,
     current_time: datetime,  # noqa: ARG001 — kept for dispatcher uniformity
 ) -> Optional[Signal]:
-    """Return a Signal when StructureState meets BB-Reclaim gates.
+    """Return a Signal when StructureState meets BB-Bounce gates.
 
     ``df_h1`` is accepted for dispatcher symmetry but no longer drives
     pattern detection — the Structure Engine has already considered H1
     in its bias and mode classification.
+
+    ``day_type`` is passed by the dispatcher; the dispatcher only routes
+    this detector on ``DayType.NORMAL`` days.
     """
-    if regime_state.get("current_regime") != RegimeLabel.RANGE.value:
-        return None
     if not structure_state.is_valid:
         return None
     if structure_state.structure_mode != "RANGE_BALANCE":
@@ -144,9 +144,7 @@ def detect_bb_reclaim(
     return Signal(
         pair=pair.upper(),
         direction=direction,
-        # 2a bridge: placeholder day-type until 2b wires the dispatcher's
-        # day-type input to the strategy. 2b removes this placeholder.
-        day_type=DayType.NORMAL,
+        day_type=day_type,
         strategy_name=_STRATEGY_NAME,
         suggested_entry_price=entry_price,
         suggested_sl_price=sl_price,
@@ -244,4 +242,4 @@ def _safe_float(value) -> float:
         return float("nan")
 
 
-__all__ = ["detect_bb_reclaim"]
+__all__ = ["detect_bb_bounce"]

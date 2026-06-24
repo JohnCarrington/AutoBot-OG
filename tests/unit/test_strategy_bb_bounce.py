@@ -1,8 +1,8 @@
-"""Tests for the Phase 11 BB Reclaim strategy rewrite.
+"""Tests for the BB Bounce strategy (clean-swap step 2b).
 
-Strategies now read :class:`StructureState` instead of doing 3-bar
-pattern detection. Tests inject hand-built StructureState objects
-and assert gate behaviour.
+Strategies read :class:`StructureState` and receive the day_type from
+the dispatcher. The detector no longer gates on regime_state — the
+dispatcher only routes it on ``DayType.NORMAL`` days.
 """
 from __future__ import annotations
 
@@ -12,8 +12,8 @@ import pandas as pd
 import pytest
 
 from day_type import DayType
-from regime.labels import Direction, RegimeLabel
-from strategies.bb_reclaim import detect_bb_reclaim
+from regime.labels import Direction
+from strategies.bb_bounce import detect_bb_bounce
 from structure_engine import StructureLevel, StructureState
 
 
@@ -40,18 +40,6 @@ def _m5(close: float = 1.30050, atr: float = 0.0020) -> pd.DataFrame:
 
 def _h1(*, macd_hist: float = 0.10) -> pd.DataFrame:
     return pd.DataFrame([{"macd_hist_12_26_9": macd_hist}])
-
-
-def _state(regime: str = "RANGE") -> dict:
-    return {
-        "current_regime": regime,
-        "current_direction": None,
-        "pending_regime": None,
-        "m5_confirmation_count": 0,
-        "last_regime_change_time": None,
-        "reason": "test",
-        "debug": {},
-    }
 
 
 def _level(
@@ -118,10 +106,10 @@ def _structure_state(
 
 
 def test_support_rejection_emits_bullish_signal() -> None:
-    sig = detect_bb_reclaim(
+    sig = detect_bb_bounce(
         df_m5=_m5(close=1.30050),
         df_h1=_h1(macd_hist=0.10),
-        regime_state=_state(),
+        day_type=DayType.NORMAL,
         structure_state=_structure_state(reaction="SUPPORT_REJECTION"),
         pair=_PAIR,
         current_time=_NOW,
@@ -129,15 +117,15 @@ def test_support_rejection_emits_bullish_signal() -> None:
     assert sig is not None
     assert sig.direction is Direction.BULLISH
     assert sig.day_type is DayType.NORMAL
-    assert sig.strategy_name == "bb_reclaim"
+    assert sig.strategy_name == "bb_bounce"
     assert sig.confidence_score == pytest.approx(0.85)  # MACD aligned
 
 
 def test_resistance_rejection_emits_bearish_signal() -> None:
-    sig = detect_bb_reclaim(
+    sig = detect_bb_bounce(
         df_m5=_m5(),
         df_h1=_h1(macd_hist=-0.10),
-        regime_state=_state(),
+        day_type=DayType.NORMAL,
         structure_state=_structure_state(reaction="RESISTANCE_REJECTION"),
         pair=_PAIR,
         current_time=_NOW,
@@ -146,23 +134,11 @@ def test_resistance_rejection_emits_bearish_signal() -> None:
     assert sig.direction is Direction.BEARISH
 
 
-def test_wrong_regime_returns_none() -> None:
-    sig = detect_bb_reclaim(
-        df_m5=_m5(),
-        df_h1=_h1(),
-        regime_state=_state(regime="TREND"),
-        structure_state=_structure_state(),
-        pair=_PAIR,
-        current_time=_NOW,
-    )
-    assert sig is None
-
-
 def test_non_range_mode_returns_none() -> None:
-    sig = detect_bb_reclaim(
+    sig = detect_bb_bounce(
         df_m5=_m5(),
         df_h1=_h1(),
-        regime_state=_state(),
+        day_type=DayType.NORMAL,
         structure_state=_structure_state(mode="TREND_CONTINUATION"),
         pair=_PAIR,
         current_time=_NOW,
@@ -172,10 +148,10 @@ def test_non_range_mode_returns_none() -> None:
 
 def test_weak_support_score_blocks_long() -> None:
     weak = _level(side="LOW", price=1.30000, score=5.5)  # < 6.0 threshold
-    sig = detect_bb_reclaim(
+    sig = detect_bb_bounce(
         df_m5=_m5(),
         df_h1=_h1(),
-        regime_state=_state(),
+        day_type=DayType.NORMAL,
         structure_state=_structure_state(
             reaction="SUPPORT_REJECTION", nearest_support=weak
         ),
@@ -186,10 +162,10 @@ def test_weak_support_score_blocks_long() -> None:
 
 
 def test_invalid_structure_state_returns_none() -> None:
-    sig = detect_bb_reclaim(
+    sig = detect_bb_bounce(
         df_m5=_m5(),
         df_h1=_h1(),
-        regime_state=_state(),
+        day_type=DayType.NORMAL,
         structure_state=_structure_state(is_valid=False),
         pair=_PAIR,
         current_time=_NOW,
@@ -199,10 +175,10 @@ def test_invalid_structure_state_returns_none() -> None:
 
 def test_no_resistance_target_leaves_tp_none() -> None:
     """One-sided support → TP is None (execution falls back to structure trail)."""
-    sig = detect_bb_reclaim(
+    sig = detect_bb_bounce(
         df_m5=_m5(),
         df_h1=_h1(),
-        regime_state=_state(),
+        day_type=DayType.NORMAL,
         structure_state=_structure_state(
             reaction="SUPPORT_REJECTION", nearest_resistance=None
         ),
@@ -214,10 +190,10 @@ def test_no_resistance_target_leaves_tp_none() -> None:
 
 
 def test_non_setup_reaction_returns_none() -> None:
-    sig = detect_bb_reclaim(
+    sig = detect_bb_bounce(
         df_m5=_m5(),
         df_h1=_h1(),
-        regime_state=_state(),
+        day_type=DayType.NORMAL,
         structure_state=_structure_state(reaction="NONE"),
         pair=_PAIR,
         current_time=_NOW,

@@ -34,9 +34,8 @@ from .types import AmendOrder, ExecutionPosition
 
 # Strategy → (primary_trail_kind, secondary_trail_kind) per §6.3.
 _PRIMARY_BY_STRATEGY: dict[str, tuple[str, str]] = {
-    "bb_reclaim": ("ema20", "swing"),
-    "ema_continuation": ("swing", "ema20"),
-    "liquidity_sweep": ("swing", "ema20"),
+    "bb_bounce": ("ema20", "swing"),
+    "ema_pullback": ("swing", "ema20"),
 }
 
 

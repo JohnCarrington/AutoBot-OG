@@ -41,7 +41,7 @@ def _signal(
         pair=pair,
         direction=direction,
         day_type=DayType.NORMAL,
-        strategy_name="ema_continuation",
+        strategy_name="ema_pullback",
         suggested_entry_price=suggested_entry_price,
         suggested_sl_price=suggested_sl_price,
         suggested_tp_price=None,
