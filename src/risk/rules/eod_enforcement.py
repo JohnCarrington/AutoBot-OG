@@ -4,29 +4,31 @@ Two distinct responsibilities, both DST-aware via :mod:`zoneinfo`:
 
 - :py:func:`check_pre_eod_suppression` — reject new entries within
   :data:`risk.constants.PRE_EOD_NO_ENTRY_MIN` minutes of NY close.
-  Applies to RANGE / VOLATILE candidates every day; applies to ALL
-  candidates on Friday (because every position closes Friday).
+  2c (B-1): the prior TREND/Mon-Thu carve-out is gone — every
+  candidate inside the buffer is rejected regardless of day-type, on
+  the grounds that the trade can't reach +1R before close and we can't
+  predict whether structure will agree at EOD.
 - :py:func:`apply_eod_force_close` — at NY close, return
   :py:class:`ForceCloseOrder` records for every position that should
-  be flat overnight. The asymmetry:
-    * RANGE / VOLATILE: always close at NY close.
-    * TREND: close UNLESS (Mon-Thu) AND (current_pnl_r >= +1R) AND
-      (regime still TREND, same direction as entry).
-    * All regimes close on Fridays at NY close.
+  be flat overnight. 2c (B-1): the carve-out for overnight hold now
+  keys on the structure engine's ``htf_bias`` matching the position's
+  direction (HTF thesis intact). Any position whose htf_bias has
+  flipped — or for which structure isn't available — force-closes.
+  The +1R floor still applies, and Fridays close everything.
 """
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
-from typing import Optional
+from typing import Mapping, Optional
 from zoneinfo import ZoneInfo
 
-from regime.labels import Direction, RegimeLabel
+from regime.labels import Direction
 
 from ..constants import (
     NY_CLOSE_HOUR_LOCAL,
     NY_TZ_NAME,
+    OVERNIGHT_HOLD_MIN_R,
     PRE_EOD_NO_ENTRY_MIN,
-    TREND_OVERNIGHT_HOLD_MIN_R,
 )
 from ..types import (
     CandidateTrade,
@@ -62,28 +64,22 @@ def check_pre_eod_suppression(
 ) -> RuleResult:
     """Reject if a new entry would have less than the EOD buffer to live.
 
-    For non-TREND regimes (RANGE / VOLATILE / TRANSITION): reject within
-    ``PRE_EOD_NO_ENTRY_MIN`` minutes of any NY close.
-    For TREND: only reject within the buffer on Fridays (TREND can
-    legitimately hold overnight Mon-Thu, but Friday closes everything).
+    2c (B-1): no day-type carve-out. Every candidate inside the
+    ``PRE_EOD_NO_ENTRY_MIN`` window before NY close is rejected.
+    Rationale: the trade has no realistic path to +1R inside the
+    buffer, and the overnight-hold decision is no longer a property
+    of the candidate's day-type — it depends on the structure engine's
+    ``htf_bias`` at EOD time, which we cannot predict at entry.
 
-    The rule does not gate behaviour outside the buffer — that is the
-    pre-existing strategy + risk pipeline's job.
+    Outside the buffer the rule allows everything; other rules in the
+    pipeline gate behaviour upstream.
     """
     next_close = _next_ny_close(now_utc)
     minutes_to_close = (next_close - now_utc).total_seconds() / 60.0
     if minutes_to_close > PRE_EOD_NO_ENTRY_MIN:
         return RuleResult(allow=True, rule=_RULE_NAME, reason="ok")
 
-    # Inside the buffer. TREND can survive overnight on Mon-Thu, so only
-    # reject TREND inside the Friday buffer.
-    # (2a: field renamed to ``intended_day_type``; comparison value
-    # remains ``RegimeLabel.TREND`` because the existing decision logic
-    # is regime-based — 2c rewrites the carve-out for day-type semantics.)
     ny_weekday = _ny_now(now_utc).weekday()
-    if candidate.intended_day_type == RegimeLabel.TREND and ny_weekday != _FRIDAY:
-        return RuleResult(allow=True, rule=_RULE_NAME, reason="ok")
-
     return RuleResult(
         allow=False,
         rule=_RULE_NAME,
@@ -100,10 +96,7 @@ def apply_eod_force_close(
     positions: list[OpenPosition],
     now_utc: datetime,
     *,
-    current_regime: RegimeLabel,
-    current_direction: Optional[Direction],
-    pending_regime: Optional[RegimeLabel],
-    pending_direction: Optional[Direction],
+    htf_bias_for_pair: Mapping[str, Optional[str]],
 ) -> list[ForceCloseOrder]:
     """Return force-close orders for positions that must be flat overnight.
 
@@ -112,26 +105,26 @@ def apply_eod_force_close(
     closed; placing the order is the caller's job.
 
     A position survives overnight (no order returned) iff ALL of:
-    - It is a TREND-regime position.
+
     - Today is Mon, Tue, Wed, or Thu (in NY local time).
-    - ``current_pnl_r >= TREND_OVERNIGHT_HOLD_MIN_R`` (default +1R).
-    - The engine's current committed regime is still TREND AND its
-      direction matches the position's entry direction.
-    - **H3 fix (review 2026-05-14):** no contradicting pending
-      transition is staged. ``pending_regime`` must be either
-      ``None`` (engine settled on the committed TREND), or
-      ``TREND`` with ``pending_direction`` matching the position's
-      entry direction (an in-flight reconfirmation of the same TREND
-      is benign). Any other pending — RANGE, VOLATILE, or
-      opposite-direction TREND — force-closes the position.
+    - ``current_pnl_r >= OVERNIGHT_HOLD_MIN_R`` (default +1R).
+    - Structure ``htf_bias`` for the position's pair still matches the
+      position's direction (BULLISH-position needs ``htf_bias="BULLISH"``;
+      BEARISH needs ``htf_bias="BEARISH"``).
 
-    ``pending_regime`` and ``pending_direction`` are **required**
-    keyword-only arguments (N1 follow-up from the 2026-05-14 Session
-    3 review). Defaults are deliberately omitted so a caller that
-    forgets to thread the engine's pending state through fails loudly
-    at the call site rather than silently disabling the H3 gate.
+    Everything else force-closes at NY close. Friday closes everything
+    unconditionally.
 
-    Everything else is force-closed at NY close.
+    Parameters
+    ----------
+    positions
+        Open positions to evaluate.
+    now_utc
+        Current UTC instant. Used to derive NY local time + weekday.
+    htf_bias_for_pair
+        Map ``pair → htf_bias`` from the latest structure analysis. A
+        missing entry (or ``None``) force-closes — fail-closed when
+        structure data is unavailable.
     """
     if not positions:
         return []
@@ -144,19 +137,6 @@ def apply_eod_force_close(
 
     orders: list[ForceCloseOrder] = []
     for pos in positions:
-        # Non-trend regimes always close at NY close.
-        # (2a: field renamed to ``day_type_at_entry``; comparison value
-        # remains ``RegimeLabel.TREND`` — 2c rewrites the carve-out.)
-        if pos.day_type_at_entry != RegimeLabel.TREND:
-            orders.append(
-                ForceCloseOrder(
-                    position_id=pos.position_id,
-                    pair=pos.pair,
-                    reason=f"eod_close: day_type={pos.day_type_at_entry.value}",
-                )
-            )
-            continue
-
         # Friday closes everything.
         if is_friday:
             orders.append(
@@ -168,19 +148,20 @@ def apply_eod_force_close(
             )
             continue
 
-        # TREND overnight-hold gates: profit AND regime-still-aligned.
-        if pos.current_pnl_r < TREND_OVERNIGHT_HOLD_MIN_R:
-            # H4 (review 2026-05-14): when the entry was inside the
-            # pre-EOD buffer, the trade had no realistic path to
-            # reach +1R before close — surface that in the reason so
-            # post-mortems can identify the wasted-entry scenario.
+        # +1R floor — a position that hasn't earned its keep closes.
+        if pos.current_pnl_r < OVERNIGHT_HOLD_MIN_R:
+            # H4 reason note (carried over from the prior breaker): when
+            # the entry was inside the pre-EOD buffer, the trade had no
+            # realistic path to reach +1R before close — surface that in
+            # the reason so post-mortems can identify the wasted-entry
+            # scenario.
             held_seconds = (now_utc - pos.entry_time_utc).total_seconds()
             held_min = held_seconds / 60.0
             inside_buffer = 0 <= held_min < PRE_EOD_NO_ENTRY_MIN
             buffer_note = (
                 f" (entry was {held_min:.1f}min before close, "
                 f"inside {PRE_EOD_NO_ENTRY_MIN}min buffer — "
-                f"no path to {TREND_OVERNIGHT_HOLD_MIN_R}R)"
+                f"no path to {OVERNIGHT_HOLD_MIN_R}R)"
                 if inside_buffer
                 else ""
             )
@@ -189,67 +170,44 @@ def apply_eod_force_close(
                     position_id=pos.position_id,
                     pair=pos.pair,
                     reason=(
-                        f"eod_close: trend_below_overnight_R "
+                        f"eod_close: below_overnight_R "
                         f"(pnl_r={pos.current_pnl_r:.2f} "
-                        f"< {TREND_OVERNIGHT_HOLD_MIN_R})"
+                        f"< {OVERNIGHT_HOLD_MIN_R})"
                         f"{buffer_note}"
                     ),
                 )
             )
             continue
 
-        if current_regime != RegimeLabel.TREND:
+        # htf_bias gate — the position survives only if structure HTF
+        # bias still agrees with the position's direction.
+        htf_bias = htf_bias_for_pair.get(pos.pair)
+        if htf_bias is None:
             orders.append(
                 ForceCloseOrder(
                     position_id=pos.position_id,
                     pair=pos.pair,
                     reason=(
-                        f"eod_close: trend_regime_lost "
-                        f"(current={current_regime.value})"
+                        "eod_close: structure_unavailable "
+                        f"(pair={pos.pair} has no current htf_bias; "
+                        "fail-closed)"
                     ),
                 )
             )
             continue
 
-        if current_direction != pos.direction:
+        expected_bias = (
+            "BULLISH" if pos.direction == Direction.BULLISH else "BEARISH"
+        )
+        if htf_bias != expected_bias:
             orders.append(
                 ForceCloseOrder(
                     position_id=pos.position_id,
                     pair=pos.pair,
                     reason=(
-                        f"eod_close: trend_direction_changed "
-                        f"(entry={pos.direction.value}, "
-                        f"current={current_direction.value if current_direction else 'None'})"
-                    ),
-                )
-            )
-            continue
-
-        # H3 (review 2026-05-14): if the engine has an in-flight
-        # pending transition staged, only let TREND survive overnight
-        # when the pending is another TREND in the same direction —
-        # i.e. a benign reconfirmation. RANGE / VOLATILE / opposite-
-        # direction pendings indicate the regime is actively
-        # transitioning away from the committed TREND, so force-close
-        # rather than ride the position through the change overnight.
-        if pending_regime is not None and not (
-            pending_regime == RegimeLabel.TREND
-            and pending_direction == pos.direction
-        ):
-            pending_dir_str = (
-                pending_direction.value
-                if pending_direction is not None
-                else "None"
-            )
-            orders.append(
-                ForceCloseOrder(
-                    position_id=pos.position_id,
-                    pair=pos.pair,
-                    reason=(
-                        f"eod_close: trend_pending_transition "
-                        f"(pending={pending_regime.value}, "
-                        f"pending_dir={pending_dir_str}, "
-                        f"entry_dir={pos.direction.value})"
+                        f"eod_close: htf_bias_misaligned "
+                        f"(entry_dir={pos.direction.value}, "
+                        f"current_htf_bias={htf_bias})"
                     ),
                 )
             )

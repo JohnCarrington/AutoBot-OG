@@ -4,15 +4,14 @@ Three independent caps:
 
 - Global: at most ``MAX_GLOBAL_POSITIONS`` open positions across all pairs.
 - Per-pair: at most ``MAX_PER_PAIR`` positions on the candidate pair.
-- Per-regime: at most ``MAX_PER_REGIME`` positions in the candidate
-  regime. The spec ("no duplicate regime stacking") means we cannot
-  stack two TREND positions even if they are on different pairs in v2.
-  v1 is GBPUSD-only so this collapses to a single-position check, but
-  the data model is per-regime forward-compatible.
+- Per-strategy: at most ``MAX_PER_STRATEGY`` positions per strategy
+  (B-4, 2c). Replaces the prior per-regime cap — the day-type spine
+  doesn't carry the "no two TREND positions" intent anymore; the spec
+  intent is preserved by binding the cap to the strategy that fires.
 """
 from __future__ import annotations
 
-from ..constants import MAX_GLOBAL_POSITIONS, MAX_PER_PAIR, MAX_PER_REGIME
+from ..constants import MAX_GLOBAL_POSITIONS, MAX_PER_PAIR, MAX_PER_STRATEGY
 from ..types import CandidateTrade, OpenPosition, RuleResult
 
 
@@ -50,23 +49,17 @@ def check_position_caps(
             ),
         )
 
-    # 2a: fields renamed; behaviour preserved — comparison is
-    # self-equality (DayType==DayType or RegimeLabel==RegimeLabel),
-    # which works under either type while values are mixed during the
-    # 2a/2b transition.
-    same_day_type = [
-        p
-        for p in positions
-        if p.day_type_at_entry == candidate.intended_day_type
+    same_strategy = [
+        p for p in positions if p.strategy_name == candidate.strategy_name
     ]
-    if len(same_day_type) >= MAX_PER_REGIME:
+    if len(same_strategy) >= MAX_PER_STRATEGY:
         return RuleResult(
             allow=False,
             rule=_RULE_NAME,
             reason=(
-                f"per-regime cap reached for "
-                f"{candidate.intended_day_type.value}: "
-                f"{len(same_day_type)} open (max {MAX_PER_REGIME})"
+                f"per-strategy cap reached for "
+                f"{candidate.strategy_name}: "
+                f"{len(same_strategy)} open (max {MAX_PER_STRATEGY})"
             ),
         )
 

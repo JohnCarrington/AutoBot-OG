@@ -45,8 +45,9 @@ SPREAD_ATR_MULT: float = _env_float("RISK_SPREAD_ATR_MULT", 0.3)
 # --- Position caps (§6.8) ---------------------------------------------------
 MAX_GLOBAL_POSITIONS: int = _env_int("RISK_MAX_GLOBAL_POSITIONS", 2)
 MAX_PER_PAIR: int = _env_int("RISK_MAX_PER_PAIR", 1)
-# Implicit cap from spec: max 1 per regime. Not env-overridable in v1.
-MAX_PER_REGIME: int = 1
+# 2c (B-4): per-regime cap replaced with per-strategy cap. No two open
+# positions from the same strategy. Not env-overridable in v1.
+MAX_PER_STRATEGY: int = 1
 
 # --- Daily drawdown stop (§6.9.1) -------------------------------------------
 DAILY_DD_LIMIT_R: float = _env_float("RISK_DAILY_DD_LIMIT_R", -3.0)
@@ -57,24 +58,9 @@ CONSECUTIVE_LOSS_COOLDOWN_HOURS: float = _env_float(
     "RISK_LOSS_COOLDOWN_HOURS", 4.0
 )
 
-# --- Regime-instability cooldown (§6.9.3) -----------------------------------
-# Counts in a rolling 60-minute window. Trigger when EITHER threshold is
-# strictly exceeded (commits > 3 OR m5_resets > 5).
-REGIME_INSTABILITY_WINDOW_MIN: int = _env_int(
-    "RISK_REGIME_INSTAB_WINDOW_MIN", 60
-)
-REGIME_INSTABILITY_COMMITS: int = _env_int(
-    "RISK_REGIME_INSTAB_COMMITS", 3
-)
-REGIME_INSTABILITY_M5_RESETS: int = _env_int(
-    "RISK_REGIME_INSTAB_M5_RESETS", 5
-)
-# Primary cooldown duration. After this elapses, the cooldown EXTENDS
-# until the next H1 close that produces ``regime_live = True`` — see
-# :py:meth:`regime.RegimeEngine.regime_live_at_last_h1_close`.
-REGIME_INSTABILITY_PAUSE_HOURS: float = _env_float(
-    "RISK_REGIME_INSTAB_PAUSE_HOURS", 1.0
-)
+# 2c (B-2): the regime-instability circuit breaker is gone. Its
+# thresholds / pause-hours constants were removed alongside the breaker
+# code in risk.rules.circuit_breakers.
 
 # --- End-of-day (§6.5) ------------------------------------------------------
 # NY close hour in America/New_York time. Converted to UTC via zoneinfo at
@@ -86,12 +72,12 @@ NY_TZ_NAME: str = os.getenv("RISK_NY_TZ", "America/New_York")
 # opening a fresh position with minutes to live.
 PRE_EOD_NO_ENTRY_MIN: int = _env_int("RISK_PRE_EOD_NO_ENTRY_MIN", 30)
 
-# --- TREND overnight hold (§6.5) --------------------------------------------
-# Minimum unrealised PnL (in R-multiples) for a TREND position to be eligible
-# for overnight hold. Set at +1R per locked decision: cleaner than depending
-# on BE-amend state we may not have in OpenPosition.
-TREND_OVERNIGHT_HOLD_MIN_R: float = _env_float(
-    "RISK_TREND_OVERNIGHT_HOLD_MIN_R", 1.0
+# --- Overnight hold (§6.5) --------------------------------------------------
+# Minimum unrealised PnL (in R-multiples) for a position to be eligible for
+# overnight hold. 2c (B-1) keeps the +1R floor but the hold decision now
+# keys on structure htf_bias alignment, not the position's regime label.
+OVERNIGHT_HOLD_MIN_R: float = _env_float(
+    "RISK_OVERNIGHT_HOLD_MIN_R", 1.0
 )
 
 __all__ = [
@@ -100,15 +86,11 @@ __all__ = [
     "DAILY_DD_LIMIT_R",
     "MAX_GLOBAL_POSITIONS",
     "MAX_PER_PAIR",
-    "MAX_PER_REGIME",
+    "MAX_PER_STRATEGY",
     "NY_CLOSE_HOUR_LOCAL",
     "NY_TZ_NAME",
+    "OVERNIGHT_HOLD_MIN_R",
     "PRE_EOD_NO_ENTRY_MIN",
-    "REGIME_INSTABILITY_COMMITS",
-    "REGIME_INSTABILITY_M5_RESETS",
-    "REGIME_INSTABILITY_PAUSE_HOURS",
-    "REGIME_INSTABILITY_WINDOW_MIN",
     "SPREAD_ABS_CAP_PIPS",
     "SPREAD_ATR_MULT",
-    "TREND_OVERNIGHT_HOLD_MIN_R",
 ]

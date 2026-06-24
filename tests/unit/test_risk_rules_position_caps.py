@@ -1,9 +1,14 @@
-"""Tests for risk.rules.position_caps."""
+"""Tests for risk.rules.position_caps.
+
+2c (B-4): per-regime cap → per-strategy cap. The rule now groups
+positions by ``strategy_name``, not by ``day_type_at_entry``.
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from regime.labels import Direction, RegimeLabel
+from day_type import DayType
+from regime.labels import Direction
 
 from risk.rules.position_caps import check_position_caps
 from risk.types import CandidateTrade, OpenPosition
@@ -14,13 +19,14 @@ def _pos(
     pid: str = "p1",
     pair: str = "GBPUSD",
     direction: Direction = Direction.BULLISH,
-    regime: RegimeLabel = RegimeLabel.TREND,
+    strategy_name: str = "ema_pullback",
 ) -> OpenPosition:
     return OpenPosition(
         position_id=pid,
         pair=pair,
         direction=direction,
-        day_type_at_entry=regime,
+        day_type_at_entry=DayType.NORMAL,
+        strategy_name=strategy_name,
         entry_price=1.30,
         current_price=1.31,
         entry_time_utc=datetime(2025, 1, 1, tzinfo=timezone.utc),
@@ -29,13 +35,14 @@ def _pos(
 
 
 def _candidate(
-    *, pair: str = "EURUSD", regime: RegimeLabel = RegimeLabel.RANGE
+    *, pair: str = "EURUSD", strategy_name: str = "bb_bounce"
 ) -> CandidateTrade:
     return CandidateTrade(
         pair=pair,
         intended_direction=Direction.BULLISH,
-        intended_day_type=regime,
+        intended_day_type=DayType.NORMAL,
         planned_entry_price=1.10,
+        strategy_name=strategy_name,
     )
 
 
@@ -48,10 +55,12 @@ def test_allows_with_no_open_positions() -> None:
 def test_rejects_at_global_cap() -> None:
     # MAX_GLOBAL_POSITIONS = 2.
     positions = [
-        _pos(pid="p1", pair="GBPUSD", regime=RegimeLabel.TREND),
-        _pos(pid="p2", pair="EURUSD", regime=RegimeLabel.RANGE),
+        _pos(pid="p1", pair="GBPUSD", strategy_name="ema_pullback"),
+        _pos(pid="p2", pair="EURUSD", strategy_name="bb_bounce"),
     ]
-    result = check_position_caps(_candidate(pair="USDJPY"), positions=positions)
+    result = check_position_caps(
+        _candidate(pair="USDJPY"), positions=positions
+    )
     assert result.allow is False
     assert "global cap reached" in result.reason
 
@@ -59,9 +68,9 @@ def test_rejects_at_global_cap() -> None:
 def test_rejects_at_per_pair_cap() -> None:
     # Per-pair cap is 1: trying to add a second GBPUSD trade fails even with
     # only one position open globally.
-    positions = [_pos(pid="p1", pair="GBPUSD", regime=RegimeLabel.TREND)]
+    positions = [_pos(pid="p1", pair="GBPUSD", strategy_name="ema_pullback")]
     result = check_position_caps(
-        _candidate(pair="GBPUSD", regime=RegimeLabel.RANGE),
+        _candidate(pair="GBPUSD", strategy_name="bb_bounce"),
         positions=positions,
     )
     assert result.allow is False
@@ -69,80 +78,67 @@ def test_rejects_at_per_pair_cap() -> None:
     assert "GBPUSD" in result.reason
 
 
-def test_rejects_at_per_regime_cap() -> None:
-    # One TREND position on GBPUSD; candidate is a TREND on a different pair.
-    positions = [_pos(pid="p1", pair="GBPUSD", regime=RegimeLabel.TREND)]
+def test_rejects_at_per_strategy_cap() -> None:
+    """B-4: two positions from the same strategy are disallowed even on
+    different pairs."""
+    positions = [_pos(pid="p1", pair="GBPUSD", strategy_name="bb_bounce")]
     result = check_position_caps(
-        _candidate(pair="EURUSD", regime=RegimeLabel.TREND),
+        _candidate(pair="EURUSD", strategy_name="bb_bounce"),
         positions=positions,
     )
     assert result.allow is False
-    assert "per-regime cap" in result.reason
-    assert "TREND" in result.reason
+    assert "per-strategy cap" in result.reason
+    assert "bb_bounce" in result.reason
 
 
-def test_allows_distinct_pair_and_regime_below_global_cap() -> None:
-    # One TREND/GBPUSD open; candidate is RANGE/EURUSD. All caps fine.
-    positions = [_pos(pid="p1", pair="GBPUSD", regime=RegimeLabel.TREND)]
+def test_allows_different_strategy_on_different_pair() -> None:
+    """B-4 positive case: distinct strategies on distinct pairs is fine."""
+    positions = [_pos(pid="p1", pair="GBPUSD", strategy_name="ema_pullback")]
     result = check_position_caps(
-        _candidate(pair="EURUSD", regime=RegimeLabel.RANGE),
+        _candidate(pair="EURUSD", strategy_name="bb_bounce"),
         positions=positions,
     )
     assert result.allow is True
 
 
 def test_global_cap_checked_before_per_pair() -> None:
-    # 2 positions on different pairs/regimes; candidate is yet another pair.
+    # 2 positions on different pairs; candidate is yet another pair.
     # Global cap is the binding rule.
     positions = [
-        _pos(pid="p1", pair="GBPUSD", regime=RegimeLabel.TREND),
-        _pos(pid="p2", pair="EURUSD", regime=RegimeLabel.RANGE),
+        _pos(pid="p1", pair="GBPUSD", strategy_name="ema_pullback"),
+        _pos(pid="p2", pair="EURUSD", strategy_name="bb_bounce"),
     ]
     result = check_position_caps(
-        _candidate(pair="USDJPY", regime=RegimeLabel.VOLATILE),
+        _candidate(pair="USDJPY", strategy_name="bb_bounce"),
         positions=positions,
     )
     assert result.allow is False
     assert "global cap" in result.reason
 
 
-def test_volatile_position_blocks_volatile_candidate() -> None:
-    positions = [
-        _pos(pid="p1", pair="GBPUSD", regime=RegimeLabel.VOLATILE)
-    ]
-    result = check_position_caps(
-        _candidate(pair="EURUSD", regime=RegimeLabel.VOLATILE),
-        positions=positions,
-    )
-    assert result.allow is False
-    assert "per-regime cap" in result.reason
-
-
 def test_position_id_does_not_affect_caps() -> None:
     # Caps are about COUNTS, not identifiers.
     positions = [_pos(pid="duplicate-id", pair="GBPUSD")]
     result = check_position_caps(
-        _candidate(pair="EURUSD", regime=RegimeLabel.RANGE),
+        _candidate(pair="EURUSD", strategy_name="bb_bounce"),
         positions=positions,
     )
     assert result.allow is True
 
 
 def test_reason_quotes_actual_counts() -> None:
-    positions = [_pos(pid="p1", pair="GBPUSD", regime=RegimeLabel.TREND)]
+    positions = [_pos(pid="p1", pair="GBPUSD", strategy_name="bb_bounce")]
     result = check_position_caps(
-        _candidate(pair="GBPUSD", regime=RegimeLabel.RANGE),
+        _candidate(pair="GBPUSD", strategy_name="ema_pullback"),
         positions=positions,
     )
+    # Per-pair fires first because the strategy doesn't match.
     assert "1 open" in result.reason
 
 
 def test_empty_positions_allows_any_candidate() -> None:
-    for regime in (
-        RegimeLabel.TREND, RegimeLabel.RANGE,
-        RegimeLabel.VOLATILE, RegimeLabel.TRANSITION,
-    ):
+    for strategy in ("bb_bounce", "ema_pullback", "news", "structure_break"):
         result = check_position_caps(
-            _candidate(pair="GBPUSD", regime=regime), positions=[]
+            _candidate(pair="GBPUSD", strategy_name=strategy), positions=[]
         )
         assert result.allow is True

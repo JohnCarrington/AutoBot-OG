@@ -261,19 +261,16 @@ def _build_runtime(
     # Persistent state.
     position_manager = PositionManager.load_from_path()
 
-    # Risk guard — must share regime engines with BotLoop (C2 fix,
-    # adversarial review 2026-05-15). We build the per-pair engine map
-    # here and pass the same instances to BOTH BotLoop and RiskGuard:
-    # BotLoop feeds the engines via process_m5_close / process_h1_close;
-    # RiskGuard reads them via the engine_for_pair callable. The old
-    # code wired a standalone engine into RiskGuard that nothing fed —
-    # the regime-instability circuit breaker was silently disabled.
+    # 2c (B-3): RiskGuard no longer needs a RegimeEngine reference —
+    # the regime-instability breaker was deleted (B-2) and the EOD
+    # carve-out keys on structure htf_bias, plumbed in at call-time by
+    # BotLoop. The per-pair regime engines are still built here and
+    # handed to BotLoop because 2d (not this step) is what deletes the
+    # regime module.
     regime_engines: dict[str, RegimeEngine] = {
         p: RegimeEngine() for p in config.pairs
     }
-    risk_guard = RiskGuard(
-        engine_for_pair=lambda pair: regime_engines[pair],
-    )
+    risk_guard = RiskGuard()
 
     # Executor.
     def _epic_resolver(pair: str) -> str:

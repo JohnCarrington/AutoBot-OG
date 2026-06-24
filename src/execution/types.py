@@ -17,7 +17,7 @@ from enum import Enum
 from typing import Literal, Optional
 
 from day_type import DayType
-from regime.labels import Direction, RegimeLabel
+from regime.labels import Direction
 from risk.types import OpenPosition as RiskOpenPosition
 from strategies.signal import StrategyName
 
@@ -156,6 +156,7 @@ class ExecutionPosition:
             pair=self.pair,
             direction=self.direction,
             day_type_at_entry=self.day_type_at_entry,
+            strategy_name=self.strategy_name,
             entry_price=self.entry_price,
             current_price=current_price,
             entry_time_utc=self.entry_time_utc,

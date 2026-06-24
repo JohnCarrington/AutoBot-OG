@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Optional
 
 from day_type import DayType
-from regime.labels import Direction, RegimeLabel
+from regime.labels import Direction
 
 
 # ---------------------------------------------------------------------------
@@ -38,16 +38,15 @@ class OpenPosition:
     pair : str
         Instrument symbol (e.g. ``"GBPUSD"``).
     direction : Direction
-        ``BULLISH`` for a long position, ``BEARISH`` for short. Aligned
-        with the regime ``Direction`` enum so the EOD "still TREND same
-        direction" check is a direct equality test.
+        ``BULLISH`` for a long position, ``BEARISH`` for short.
     day_type_at_entry : DayType
-        Day-type label captured at open. Drives EOD policy +
-        duplicate-stacking checks. (2a: field renamed from
-        ``regime_at_entry`` and re-typed to ``DayType``. 2c-zone rules
-        still read this for now and compare against ``RegimeLabel.TREND``
-        for their behavioural carve-outs — the rename is mechanical,
-        decision logic moves to day-type semantics in 2c.)
+        Day-type label captured at open. Surfaced to consumers for
+        diagnostics; 2c moved the EOD overnight-hold decision off this
+        field onto structure ``htf_bias`` (see B-1).
+    strategy_name : str
+        Name of the strategy that produced this position. Drives the
+        per-strategy position cap (B-4) — no two open positions from
+        the same strategy.
     entry_price : float
         For diagnostics; not used by any rule in Phase 4.
     current_price : float
@@ -58,13 +57,14 @@ class OpenPosition:
         Current unrealised PnL expressed in R-multiples of the initial
         stop distance. The caller computes this from
         ``(current_price − entry_price) / initial_stop_distance``. Used
-        by the daily DD check and the TREND-overnight-hold gate.
+        by the daily DD check and the overnight-hold gate.
     """
 
     position_id: str
     pair: str
     direction: Direction
     day_type_at_entry: DayType
+    strategy_name: str
     entry_price: float
     current_price: float
     entry_time_utc: datetime
@@ -90,16 +90,17 @@ class AccountState:
 class CandidateTrade:
     """Trade the strategy layer is proposing to open.
 
-    (2a: ``intended_regime: RegimeLabel`` renamed to
-    ``intended_day_type: DayType``. 2c-zone rule code keeps the rename
-    transitionally and compares against ``RegimeLabel.TREND`` — the
-    final type cleanup happens in 2c alongside the decision rewrites.)
+    2c: gains ``strategy_name`` so the per-strategy position cap
+    (B-4) can group open positions by the strategy that produced
+    them. The field comes straight from the originating
+    :py:class:`strategies.Signal`.
     """
 
     pair: str
     intended_direction: Direction
     intended_day_type: DayType
     planned_entry_price: float
+    strategy_name: str
 
 
 @dataclass(frozen=True)
@@ -158,7 +159,7 @@ class ForceCloseOrder:
 
 
 # ---------------------------------------------------------------------------
-# Re-export Direction / DayType / RegimeLabel for callers that import from here
+# Re-export Direction / DayType for callers that import from here
 # ---------------------------------------------------------------------------
 
 __all__ = [
@@ -169,14 +170,11 @@ __all__ = [
     "ForceCloseOrder",
     "MarketSnapshot",
     "OpenPosition",
-    "RegimeLabel",
     "RiskDecision",
     "RuleResult",
 ]
 
 
-# DayType, Direction and RegimeLabel are imported above; keep references
-# visible so linters do not flag the re-exports as unused. RegimeLabel
-# stays re-exported through 2a/2b — 2c-zone rule code still consults it
-# and tests still construct positions with regime values.
-_ = (DayType, Direction, Optional, RegimeLabel)
+# DayType / Direction are imported above; keep references visible so
+# linters do not flag the re-exports as unused.
+_ = (DayType, Direction, Optional)

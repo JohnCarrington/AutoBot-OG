@@ -86,12 +86,16 @@ def _parse_date(value: Optional[str]) -> Optional[date]:
 
 @dataclass
 class CircuitBreakerState:
-    """Persistent state for the three circuit breakers.
+    """Persistent state for the two circuit breakers.
 
     Fields are tagged for direct JSON round-trip. Updates set ``_dirty
     = True``; :py:meth:`save_if_dirty` is called by the
     :py:class:`risk.guard.RiskGuard` after each rule pass that may have
     mutated state.
+
+    2c (B-2): the ``regime_instability_*`` fields were dropped along
+    with the regime-instability breaker. ``load`` still tolerates
+    legacy JSON files that include them — the unknown keys are ignored.
 
     Attributes
     ----------
@@ -112,12 +116,6 @@ class CircuitBreakerState:
         :data:`risk.constants.DAILY_DD_LIMIT_R`. By convention set to
         the next session boundary (next NY close) so it auto-clears
         when ``daily_dd_session_date`` rolls.
-    regime_instability_cooldown_until_utc : Optional[datetime]
-        Primary 1-hour cooldown after exceeding the commit-or-reset
-        thresholds. After this elapses, the regime-live check kicks in.
-    regime_instability_pair : Optional[str]
-        Pair the instability cooldown applies to. v1 single-pair, but
-        the data model is per-pair.
     """
 
     path: Path = field(default=DEFAULT_STATE_PATH)
@@ -125,8 +123,6 @@ class CircuitBreakerState:
     consecutive_loss_cooldown_until_utc: Optional[datetime] = None
     daily_dd_session_date: Optional[date] = None
     daily_dd_cooldown_until_utc: Optional[datetime] = None
-    regime_instability_cooldown_until_utc: Optional[datetime] = None
-    regime_instability_pair: Optional[str] = None
     _dirty: bool = field(default=False, repr=False)
 
     # --- Construction --------------------------------------------------------
@@ -151,6 +147,8 @@ class CircuitBreakerState:
                 "[risk-state] could not load %s (%s) — starting fresh", p, exc
             )
             return cls(path=p)
+        # 2c (B-2): legacy ``regime_instability_*`` keys are ignored
+        # silently — the breaker is gone, so its state is moot.
         return cls(
             path=p,
             loss_streak=int(data.get("loss_streak", 0)),
@@ -163,10 +161,6 @@ class CircuitBreakerState:
             daily_dd_cooldown_until_utc=_parse_dt(
                 data.get("daily_dd_cooldown_until_utc")
             ),
-            regime_instability_cooldown_until_utc=_parse_dt(
-                data.get("regime_instability_cooldown_until_utc")
-            ),
-            regime_instability_pair=data.get("regime_instability_pair"),
         )
 
     # --- Persistence ---------------------------------------------------------
@@ -187,10 +181,6 @@ class CircuitBreakerState:
             "daily_dd_cooldown_until_utc": _iso_or_none(
                 self.daily_dd_cooldown_until_utc
             ),
-            "regime_instability_cooldown_until_utc": _iso_or_none(
-                self.regime_instability_cooldown_until_utc
-            ),
-            "regime_instability_pair": self.regime_instability_pair,
         }
         with self.path.open("w") as f:
             json.dump(data, f, indent=2, sort_keys=True)

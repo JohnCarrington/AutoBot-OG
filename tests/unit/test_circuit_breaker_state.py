@@ -51,7 +51,6 @@ def test_load_returns_fresh_state_if_file_missing(tmp_path: Path) -> None:
     assert s.loss_streak == 0
     assert s.consecutive_loss_cooldown_until_utc is None
     assert s.daily_dd_cooldown_until_utc is None
-    assert s.regime_instability_cooldown_until_utc is None
     assert s.path == path
     assert s._dirty is False
 
@@ -73,8 +72,6 @@ def test_load_recovers_from_unparseable_datetime(tmp_path: Path) -> None:
                 "consecutive_loss_cooldown_until_utc": "not-a-date",
                 "daily_dd_cooldown_until_utc": "garbage",
                 "daily_dd_session_date": "not-a-date",
-                "regime_instability_cooldown_until_utc": None,
-                "regime_instability_pair": None,
             }
         )
     )
@@ -84,6 +81,26 @@ def test_load_recovers_from_unparseable_datetime(tmp_path: Path) -> None:
     assert s.consecutive_loss_cooldown_until_utc is None
     assert s.daily_dd_cooldown_until_utc is None
     assert s.daily_dd_session_date is None
+
+
+def test_load_ignores_legacy_regime_instability_fields(tmp_path: Path) -> None:
+    """2c (B-2): the breaker was deleted; legacy JSON keys are silently
+    ignored so an on-disk file from a pre-2c run still loads."""
+    path = tmp_path / "cb.json"
+    path.write_text(
+        json.dumps(
+            {
+                "loss_streak": 1,
+                "regime_instability_cooldown_until_utc": (
+                    "2025-05-14T18:00:00+00:00"
+                ),
+                "regime_instability_pair": "GBPUSD",
+            }
+        )
+    )
+    s = CircuitBreakerState.load(path)
+    assert s.loss_streak == 1
+    assert not hasattr(s, "regime_instability_cooldown_until_utc")
 
 
 # --- Round-trip save/load --------------------------------------------------
@@ -98,8 +115,6 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
         consecutive_loss_cooldown_until_utc=cooldown_until,
         daily_dd_session_date=date(2025, 5, 14),
         daily_dd_cooldown_until_utc=cooldown_until + timedelta(hours=1),
-        regime_instability_cooldown_until_utc=cooldown_until,
-        regime_instability_pair="GBPUSD",
     )
     saved.save()
     loaded = CircuitBreakerState.load(path)
@@ -110,7 +125,6 @@ def test_save_and_load_round_trip(tmp_path: Path) -> None:
         loaded.daily_dd_cooldown_until_utc
         == cooldown_until + timedelta(hours=1)
     )
-    assert loaded.regime_instability_pair == "GBPUSD"
 
 
 def test_save_creates_parent_directories(tmp_path: Path) -> None:

@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 
 import pytest
 
-from regime.labels import Direction, RegimeLabel
+from day_type import DayType
+from regime.labels import Direction
 
 from risk.news_calendar.calendar import BlackoutResult
 from risk.rules import news_blackout
@@ -23,8 +24,9 @@ def _candidate(pair: str = "GBPUSD") -> CandidateTrade:
     return CandidateTrade(
         pair=pair,
         intended_direction=Direction.BULLISH,
-        intended_day_type=RegimeLabel.TREND,
+        intended_day_type=DayType.NORMAL,
         planned_entry_price=1.30,
+        strategy_name="bb_bounce",
     )
 
 

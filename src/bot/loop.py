@@ -156,6 +156,11 @@ class _PerPairBotState:
     pair: str
     regime_engine: RegimeEngine
     last_h1_open_processed: Optional[datetime] = None
+    # 2c (B-1): cache the latest structure snapshot so the EOD rule can
+    # consult htf_bias per pair without re-running analyze_structure.
+    # Updated at the bottom of every BAR_CLOSE handler after the
+    # structure engine produces a snapshot.
+    latest_structure_state: Optional[StructureState] = None
 
 
 # ---------------------------------------------------------------------------
@@ -710,6 +715,9 @@ class BotLoop:
             session_state=None,
         )
         log_structure_state(structure_state)
+        # 2c (B-1): cache the snapshot so the EOD rule consults the
+        # latest htf_bias when deciding the overnight-hold carve-out.
+        self._pair_state[pair].latest_structure_state = structure_state
 
         # Phase 12: structure-alerts pipeline. Runs after the engine
         # produces the snapshot, before periodic tasks and the signal
@@ -1097,6 +1105,20 @@ class BotLoop:
             self._recent_closes.pop(deal_id, None)
         return outcome
 
+    def _structure_state_for_pair(
+        self, pair: str,
+    ) -> Optional[StructureState]:
+        """Latest structure snapshot for ``pair``, or ``None`` if absent.
+
+        Handed to :py:meth:`RiskGuard.positions_to_force_close` so the
+        EOD rule can consult the current ``htf_bias`` per pair (2c B-1).
+        Returns ``None`` for pairs that have not yet produced a
+        BAR_CLOSE this session — the EOD rule treats that as
+        fail-closed.
+        """
+        state = self._pair_state.get(pair)
+        return state.latest_structure_state if state is not None else None
+
     def _maybe_force_close_orders(self) -> None:
         """Phase 4 owns the "fire once per day" guard. We just call it.
 
@@ -1116,7 +1138,9 @@ class BotLoop:
         positions = self._collect_open_positions(latest_prices=self._latest_prices())
         try:
             orders = self._risk.positions_to_force_close(
-                positions=positions, now_utc=self._clock(),
+                positions=positions,
+                now_utc=self._clock(),
+                structure_state_for_pair=self._structure_state_for_pair,
             )
         except Exception as exc:
             self._periodic_failures.record_failure(exc, now_utc=self._clock())
@@ -1286,15 +1310,12 @@ class BotLoop:
         # Build the risk-layer inputs.
         latest_prices = self._latest_prices()
         positions = self._collect_open_positions(latest_prices=latest_prices)
-        # 2a: ``intended_regime`` renamed to ``intended_day_type``;
-        # value flows through from ``signal.day_type`` (placeholder
-        # ``DayType.NORMAL`` from strategies until 2b wires the real
-        # day-type via the dispatcher).
         candidate = CandidateTrade(
             pair=signal.pair,
             intended_direction=signal.direction,
             intended_day_type=signal.day_type,
             planned_entry_price=signal.suggested_entry_price,
+            strategy_name=signal.strategy_name,
         )
         account = AccountState(
             balance=self._account_balance,

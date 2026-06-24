@@ -256,14 +256,25 @@ class _FakeRiskGuard:
             return self.allow_result
         return _Decision(allow=True, rule="ok", reason="", debug={})
 
-    def positions_to_force_close(self, *, positions, now_utc):
-        # Touch the engine per position-pair so a stale engine surfaces.
-        for pos in positions:
-            eng = self._resolve_engine(pos.pair)
-            if eng is not None:
-                eng.is_live()
+    def positions_to_force_close(
+        self, *, positions, now_utc, structure_state_for_pair=None,
+    ):
+        # 2c (B-3): the real RiskGuard no longer consults the regime
+        # engine. The fake keeps engine routing only for the C2 identity
+        # tests below; the production overnight-hold decision is driven
+        # by structure_state_for_pair (htf_bias per pair).
+        if structure_state_for_pair is not None:
+            for pos in positions:
+                try:
+                    structure_state_for_pair(pos.pair)
+                except Exception:
+                    pass
         self.force_close_calls.append(
-            {"positions": positions, "now_utc": now_utc}
+            {
+                "positions": positions,
+                "now_utc": now_utc,
+                "structure_state_for_pair": structure_state_for_pair,
+            }
         )
         return list(self.force_close_result)
 
@@ -821,26 +832,6 @@ def test_bot_loop_and_risk_guard_share_engine_instance_identity(
     # Resolve via its accessor and confirm same instance.
     resolved = pieces["risk"]._engine_for_pair("GBPUSD")
     assert resolved is engines["GBPUSD"]
-
-
-def test_risk_guard_falls_back_to_single_engine_when_callable_not_provided() -> None:
-    """RiskGuard backward compat: legacy single-engine form still works."""
-    from risk.guard import RiskGuard
-    from risk.state.circuit_breaker_state import CircuitBreakerState
-    from regime.engine import RegimeEngine
-    engine = RegimeEngine()
-    rg = RiskGuard(engine=engine, state=CircuitBreakerState())
-    # engine property returns the legacy reference.
-    assert rg.engine is engine
-    # Resolver routes any pair to the single engine.
-    assert rg._resolve_engine("GBPUSD") is engine  # type: ignore[attr-defined]
-    assert rg._resolve_engine("EURUSD") is engine  # type: ignore[attr-defined]
-
-
-def test_risk_guard_rejects_construction_without_any_engine() -> None:
-    from risk.guard import RiskGuard
-    with pytest.raises(ValueError, match="engine"):
-        RiskGuard()  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
