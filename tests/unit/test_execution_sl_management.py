@@ -16,14 +16,20 @@ _TS = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
 
 
 def _pos(**overrides) -> ExecutionPosition:
-    """A LONG GBPUSD TREND position, 15-pip initial stop."""
+    """A LONG GBPUSD position, 15-pip initial stop.
+
+    Default cell is ``(bb_bounce, NORMAL)`` — a reachable matrix cell
+    with the historical +1.0R BE trigger and ema20-primary trail. Tests
+    that want a news-day trend cell override both ``strategy_name`` and
+    ``day_type_at_entry`` explicitly.
+    """
     defaults = dict(
         deal_id="D1",
         deal_reference="REF",
         pair="GBPUSD",
         direction=Direction.BULLISH,
         day_type_at_entry=DayType.NORMAL,
-        strategy_name="ema_pullback",
+        strategy_name="bb_bounce",
         size_units=1.0,
         entry_price=1.30000,
         initial_sl_price=1.29850,  # 15p risk
@@ -115,11 +121,12 @@ def _trail_bars(*, swing_low: float, swing_high: float, ema20: float) -> pd.Data
 
 
 def test_trail_picks_conservative_long_swing_primary() -> None:
-    # ema_pullback → swing primary. LONG conservative = higher value.
+    # ema_pullback BIG_NEWS_DAY → swing primary. LONG conservative = higher value.
     # Swing low at 1.29960 (10p below entry), EMA20 at 1.30020 (just above entry).
     # Both are valid trail candidates (below current price 1.30100); conservative = 1.30020.
     p = _pos(
         strategy_name="ema_pullback",
+        day_type_at_entry=DayType.BIG_NEWS_DAY,
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30010,  # BE level
@@ -137,6 +144,7 @@ def test_trail_picks_conservative_long_swing_primary() -> None:
 def test_trail_picks_swing_when_higher_than_ema20() -> None:
     p = _pos(
         strategy_name="ema_pullback",
+        day_type_at_entry=DayType.BIG_NEWS_DAY,
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30010,
@@ -181,6 +189,7 @@ def test_trail_rejects_ema20_on_wrong_side_long() -> None:
     # EMA20 above current price on a LONG — not a valid candidate.
     p = _pos(
         strategy_name="ema_pullback",
+        day_type_at_entry=DayType.BIG_NEWS_DAY,
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30010,
@@ -196,6 +205,7 @@ def test_trail_rejects_ema20_on_wrong_side_long() -> None:
 def test_trail_never_widens() -> None:
     p = _pos(
         strategy_name="ema_pullback",
+        day_type_at_entry=DayType.BIG_NEWS_DAY,
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30050,  # already tighter than candidates below
@@ -208,6 +218,7 @@ def test_trail_never_widens() -> None:
 def test_trail_requires_min_delta() -> None:
     p = _pos(
         strategy_name="ema_pullback",
+        day_type_at_entry=DayType.BIG_NEWS_DAY,
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30020,
@@ -236,6 +247,7 @@ def test_trail_empty_dataframe_returns_none() -> None:
 def test_trail_with_no_swing_data_falls_back_to_ema20() -> None:
     p = _pos(
         strategy_name="ema_pullback",
+        day_type_at_entry=DayType.BIG_NEWS_DAY,
         be_moved=True,
         trail_active=True,
         current_sl_price=1.30010,
@@ -254,7 +266,10 @@ def test_trail_with_no_swing_data_falls_back_to_ema20() -> None:
     assert amend.reason == "trail_ema20_secondary"
 
 
-def test_unknown_strategy_returns_none() -> None:
+def test_unknown_cell_raises_keyerror() -> None:
+    """Step 6 fail-loud guarantee: an unreachable (strategy, day_type)
+    raises ``KeyError`` instead of silently defaulting. Catches a
+    dispatcher/matrix drift bug at the position's first SL evaluation."""
     p = _pos(
         strategy_name="experimental_pattern",  # type: ignore[arg-type]
         be_moved=True,
@@ -262,5 +277,59 @@ def test_unknown_strategy_returns_none() -> None:
         current_sl_price=1.30010,
     )
     df = _trail_bars(swing_low=1.29960, swing_high=1.30200, ema20=1.30020)
+    with pytest.raises(KeyError):
+        evaluate_sl_amend(p, df, current_price=1.30100)
+
+
+def test_news_day_ema_pullback_be_fires_at_1_5r() -> None:
+    """Step 6: ema_pullback on BIG_NEWS_DAY uses the wider +1.5R BE
+    trigger from the matrix, not the legacy +1.0R."""
+    p = _pos(
+        strategy_name="ema_pullback",
+        day_type_at_entry=DayType.BIG_NEWS_DAY,
+        # entry 1.30000, SL 1.29850, 15p risk → +1R=1.30150, +1.5R≈1.30225.
+    )
+    # At +1.0R the BE move must NOT fire (the legacy trigger is gone for this cell).
+    amend_at_1r = evaluate_sl_amend(p, _m5([]), current_price=1.30150)
+    assert amend_at_1r is None
+    # At +1.51R the BE move fires; SL → entry+1p = 1.30010. Use a price
+    # clearly above the 1.5R threshold to avoid FP-edge noise on
+    # (current-entry)/initial_sl_distance.
+    amend_at_15r = evaluate_sl_amend(p, _m5([]), current_price=1.30230)
+    assert amend_at_15r is not None
+    assert amend_at_15r.reason == "be_move_at_1r"  # label stays historical
+    assert amend_at_15r.new_sl_price == pytest.approx(1.30010)
+
+
+def test_news_day_structure_break_be_fires_at_1_5r() -> None:
+    """Step 6: structure_break on PRE_BIG_NEWS also uses +1.5R BE."""
+    p = _pos(
+        strategy_name="structure_break",
+        day_type_at_entry=DayType.PRE_BIG_NEWS,
+    )
+    assert evaluate_sl_amend(p, _m5([]), current_price=1.30150) is None
+    amend = evaluate_sl_amend(p, _m5([]), current_price=1.30230)
+    assert amend is not None
+    assert amend.new_sl_price == pytest.approx(1.30010)
+
+
+def test_structure_break_now_trails_swing_primary() -> None:
+    """Phase 1 found that ``structure_break`` was missing from the old
+    ``_PRIMARY_BY_STRATEGY`` table — trail returned None and the
+    position sat at BE indefinitely. Step 6 (matrix-driven trail)
+    fixes this: structure_break now trails with ``(swing, ema20)``.
+    """
+    p = _pos(
+        strategy_name="structure_break",
+        day_type_at_entry=DayType.BIG_NEWS_DAY,
+        be_moved=True,
+        trail_active=True,
+        current_sl_price=1.30010,
+    )
+    df = _trail_bars(swing_low=1.30040, swing_high=1.30200, ema20=1.30020)
     amend = evaluate_sl_amend(p, df, current_price=1.30100)
-    assert amend is None
+    assert amend is not None
+    # Swing (1.30040) is the primary; it's also the more-conservative
+    # candidate vs ema20 (1.30020) for a LONG, so it wins.
+    assert amend.new_sl_price == pytest.approx(1.30040)
+    assert amend.reason == "trail_swing_primary"

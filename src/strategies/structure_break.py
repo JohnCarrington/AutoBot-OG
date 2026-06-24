@@ -52,10 +52,10 @@ from day_type import DayType
 from structure_engine import StructureLevel, StructureState
 
 from .constants import (
-    STRUCT_BREAK_ATR_MULT,
     STRUCT_BREAK_CONF_HIGH,
     STRUCT_BREAK_CONF_LOW,
 )
+from .management import profile_for
 from .signal import Signal, compute_invalid_after
 
 
@@ -105,11 +105,14 @@ def detect_structure_break(
     if math.isnan(entry_price):
         return None
 
+    profile = profile_for(_STRATEGY_NAME, day_type)
     sl_price = _build_sl(
         direction=direction,
         anchor_price=anchor_price,
         atr_m5=atr_m5,
         pair=pair,
+        sl_atr_mult=profile.sl_atr_mult,
+        sl_floor_pips_override=profile.sl_floor_pips_override,
     )
     confidence = _confidence(direction=direction, df_h1=df_h1)
     source_ts = _latest_timestamp(df_m5)
@@ -158,10 +161,16 @@ def _build_sl(
     anchor_price: float,
     atr_m5: float,
     pair: str,
+    sl_atr_mult: float,
+    sl_floor_pips_override: float | None,
 ) -> float:
     atr_pips = price_to_pips(pair, atr_m5)
-    floor_pips = MIN_SL_PIPS.get(pair.upper(), 12.0)
-    sl_pips = max(floor_pips, STRUCT_BREAK_ATR_MULT * atr_pips)
+    floor_pips = (
+        sl_floor_pips_override
+        if sl_floor_pips_override is not None
+        else MIN_SL_PIPS.get(pair.upper(), 12.0)
+    )
+    sl_pips = max(floor_pips, sl_atr_mult * atr_pips)
     sl_distance = sl_pips * pip_size_for(pair)
     return (
         anchor_price - sl_distance

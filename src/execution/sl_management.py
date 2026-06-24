@@ -1,17 +1,28 @@
-"""Stop-loss management: BE move at +1R + structure / EMA20 trailing.
+"""Stop-loss management: BE move + structure / EMA20 trailing.
 
 Pure logic — given an :py:class:`ExecutionPosition`, the latest M5
 DataFrame, and the current price, decide whether to emit an
 :py:class:`AmendOrder`. No broker calls; the executor forwards the
 order to :py:class:`feed.ig_rest.IGClient`.
 
+Step 6: the BE trigger, BE buffer, trail priority, and min-delta all
+flow from the :py:func:`strategies.management.profile_for` lookup
+keyed on ``(position.strategy_name, position.day_type_at_entry)`` —
+both fields are confirmed present + persisted (Phase 1 mapping). A
+single ``profile = profile_for(...)`` call near the top of
+:py:func:`evaluate_sl_amend` resolves all knobs for the call.
+
+The lookup is fail-loud: a position whose (strategy, day_type) is not
+in the matrix raises ``KeyError``. That's deliberate — the dispatcher
+and matrix must stay in lockstep.
+
 Spec sources
 ------------
-- ``docs/v1_architecture.md`` §6.2 (BE at +1R).
-- ``docs/v1_architecture.md`` §6.3 (trail table per strategy).
-- §6.11 (Phase 6 locked decisions — added in this build):
-  trail gates on ``be_moved``; conservative = closer-to-price;
-  never-widen rule; EMA20 wrong-side rejection.
+- ``docs/v1_architecture.md`` §6.2 (BE move).
+- ``docs/v1_architecture.md`` §6.3 (trail per strategy).
+- §6.11 (Phase 6 locked decisions): trail gates on ``be_moved``;
+  conservative = closer-to-price; never-widen rule; EMA20 wrong-side
+  rejection.
 """
 from __future__ import annotations
 
@@ -23,20 +34,10 @@ import pandas as pd
 
 from config.pair_config import MIN_SL_PIPS, pip_size_for, pip_to_price, price_to_pips
 from common import Direction
+from strategies.management import ManagementProfile, profile_for
 from structure import get_structure_state
 
-from .constants import (
-    EXECUTION_BE_MOVE_BUFFER_PIPS,
-    EXECUTION_SL_AMEND_MIN_DELTA_PIPS,
-)
 from .types import AmendOrder, ExecutionPosition
-
-
-# Strategy → (primary_trail_kind, secondary_trail_kind) per §6.3.
-_PRIMARY_BY_STRATEGY: dict[str, tuple[str, str]] = {
-    "bb_bounce": ("ema20", "swing"),
-    "ema_pullback": ("swing", "ema20"),
-}
 
 
 def evaluate_sl_amend(
@@ -49,25 +50,26 @@ def evaluate_sl_amend(
     Branch order:
 
     1. **BE move**: if ``not position.be_moved`` and
-       ``current_pnl_r >= 1.0``, return the BE amend. The new SL is
-       ``entry ± EXECUTION_BE_MOVE_BUFFER_PIPS`` (in the trade's
-       favour) — not exactly at entry. The buffer protects against
-       spread-oscillation triggering at the +1R bar.
+       ``current_pnl_r >= profile.be_trigger_r``, return the BE amend.
+       The new SL is ``entry ± profile.be_buffer_pips`` (in the trade's
+       favour). The buffer protects against spread-oscillation
+       triggering at the BE bar.
     2. **Trail**: if ``position.trail_active`` (set by the BE move),
-       compute both candidate trail levels per the strategy's
-       priority list, pick the conservative one (closer to current
-       price), and return an amend only if the move improves on
-       ``current_sl_price`` by more than
-       ``EXECUTION_SL_AMEND_MIN_DELTA_PIPS``.
+       compute both candidate trail levels per
+       ``(profile.trail_primary, profile.trail_secondary)``, pick the
+       conservative one (closer to current price), and return an
+       amend only if the move improves on ``current_sl_price`` by
+       more than ``profile.trail_min_delta_pips``.
 
-    Returns ``None`` when no amend is warranted, when required data
-    is missing, or when the candidate would widen the SL.
+    Profile lookup is fail-loud — an unreachable
+    ``(strategy_name, day_type_at_entry)`` raises ``KeyError``.
     """
+    profile = profile_for(position.strategy_name, position.day_type_at_entry)
     if not position.be_moved:
-        return _try_be_move(position, current_price)
+        return _try_be_move(position, current_price, profile)
     if not position.trail_active:
         return None
-    return _try_trail(position, df_m5, current_price)
+    return _try_trail(position, df_m5, current_price, profile)
 
 
 # ---------------------------------------------------------------------------
@@ -76,12 +78,14 @@ def evaluate_sl_amend(
 
 
 def _try_be_move(
-    position: ExecutionPosition, current_price: float
+    position: ExecutionPosition,
+    current_price: float,
+    profile: ManagementProfile,
 ) -> Optional[AmendOrder]:
     pnl_r = position.current_pnl_r(current_price)
-    if pnl_r < 1.0:
+    if pnl_r < profile.be_trigger_r:
         return None
-    buffer_price = pip_to_price(position.pair, EXECUTION_BE_MOVE_BUFFER_PIPS)
+    buffer_price = pip_to_price(position.pair, profile.be_buffer_pips)
     if position.direction == Direction.BULLISH:
         new_sl = position.entry_price + buffer_price
     else:
@@ -89,8 +93,8 @@ def _try_be_move(
 
     # Defensive: never widen on the BE move either. A BE amend that
     # ends up worse than the current SL means the trade somehow ran
-    # past +1R while the existing SL is already tighter — keep the
-    # tighter SL.
+    # past the BE trigger while the existing SL is already tighter —
+    # keep the tighter SL.
     if not _improves(position.direction, new_sl, position.current_sl_price):
         return None
     return AmendOrder(
@@ -109,17 +113,24 @@ def _try_trail(
     position: ExecutionPosition,
     df_m5: pd.DataFrame,
     current_price: float,
+    profile: ManagementProfile,
 ) -> Optional[AmendOrder]:
     if len(df_m5) == 0:
         return None
-    priorities = _PRIMARY_BY_STRATEGY.get(position.strategy_name)
-    if priorities is None:
-        return None  # unknown strategy — defensive, should not occur
+    primary_kind = profile.trail_primary
+    secondary_kind = profile.trail_secondary
+    if primary_kind == "none" and secondary_kind == "none":
+        return None
 
-    primary_kind, secondary_kind = priorities
-    primary = _candidate(primary_kind, position.direction, df_m5, current_price)
-    secondary = _candidate(
-        secondary_kind, position.direction, df_m5, current_price
+    primary = (
+        _candidate(primary_kind, position.direction, df_m5, current_price)
+        if primary_kind != "none"
+        else None
+    )
+    secondary = (
+        _candidate(secondary_kind, position.direction, df_m5, current_price)
+        if secondary_kind != "none"
+        else None
     )
 
     chosen, chosen_reason = _pick_conservative(
@@ -140,7 +151,7 @@ def _try_trail(
     delta_pips = price_to_pips(
         position.pair, abs(chosen - position.current_sl_price)
     )
-    if delta_pips + 1e-3 < EXECUTION_SL_AMEND_MIN_DELTA_PIPS:
+    if delta_pips + 1e-3 < profile.trail_min_delta_pips:
         return None
     if not _improves(position.direction, chosen, position.current_sl_price):
         return None
