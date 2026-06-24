@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from config.pair_config import pip_size_for, pip_to_price, price_to_pips
-from regime.labels import Direction, RegimeLabel
+from day_type import DayType
+from regime.labels import Direction
 from strategies.signal import Signal, compute_invalid_after
 
 
@@ -15,7 +16,7 @@ def _signal(
     *,
     pair: str = "GBPUSD",
     direction: Direction = Direction.BULLISH,
-    regime: RegimeLabel = RegimeLabel.RANGE,
+    day_type: DayType = DayType.NORMAL,
     strategy_name: str = "bb_reclaim",
     suggested_entry_price: float = 1.30000,
     suggested_sl_price: float = 1.29850,
@@ -28,7 +29,7 @@ def _signal(
     return Signal(
         pair=pair,
         direction=direction,
-        regime=regime,
+        day_type=day_type,
         strategy_name=strategy_name,
         suggested_entry_price=suggested_entry_price,
         suggested_sl_price=suggested_sl_price,
@@ -47,9 +48,9 @@ def test_signal_is_frozen() -> None:
 
 
 def test_signal_uses_enum_types() -> None:
-    sig = _signal(direction=Direction.BEARISH, regime=RegimeLabel.TREND)
+    sig = _signal(direction=Direction.BEARISH, day_type=DayType.BIG_NEWS_DAY)
     assert sig.direction is Direction.BEARISH
-    assert sig.regime is RegimeLabel.TREND
+    assert sig.day_type is DayType.BIG_NEWS_DAY
 
 
 def test_compute_invalid_after_adds_five_minutes() -> None:

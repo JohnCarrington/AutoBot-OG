@@ -7,19 +7,23 @@ from pathlib import Path
 from execution.position_manager import PositionManager
 from execution.state.positions_state import PositionsState
 from execution.types import ExecutionPosition
-from regime.labels import Direction, RegimeLabel
+from day_type import DayType
+from regime.labels import Direction
 
 
 _TS = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
 
 
 def _pos(deal_id: str = "D1", **overrides) -> ExecutionPosition:
+    # Persistence parses ``day_type_at_entry`` strictly via ``DayType(value)``
+    # — use a DayType value here, not RegimeLabel (which the 2c-zone tests
+    # still use elsewhere under Python's runtime duck typing).
     defaults = dict(
         deal_id=deal_id,
         deal_reference=f"REF_{deal_id}",
         pair="GBPUSD",
         direction=Direction.BULLISH,
-        regime_at_entry=RegimeLabel.TREND,
+        day_type_at_entry=DayType.NORMAL,
         strategy_name="ema_continuation",
         size_units=1.0,
         entry_price=1.30000,

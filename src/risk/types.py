@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
 
+from day_type import DayType
 from regime.labels import Direction, RegimeLabel
 
 
@@ -40,9 +41,13 @@ class OpenPosition:
         ``BULLISH`` for a long position, ``BEARISH`` for short. Aligned
         with the regime ``Direction`` enum so the EOD "still TREND same
         direction" check is a direct equality test.
-    regime_at_entry : RegimeLabel
-        Which regime emitted the trade (drives EOD policy + duplicate-
-        stacking checks).
+    day_type_at_entry : DayType
+        Day-type label captured at open. Drives EOD policy +
+        duplicate-stacking checks. (2a: field renamed from
+        ``regime_at_entry`` and re-typed to ``DayType``. 2c-zone rules
+        still read this for now and compare against ``RegimeLabel.TREND``
+        for their behavioural carve-outs — the rename is mechanical,
+        decision logic moves to day-type semantics in 2c.)
     entry_price : float
         For diagnostics; not used by any rule in Phase 4.
     current_price : float
@@ -59,7 +64,7 @@ class OpenPosition:
     position_id: str
     pair: str
     direction: Direction
-    regime_at_entry: RegimeLabel
+    day_type_at_entry: DayType
     entry_price: float
     current_price: float
     entry_time_utc: datetime
@@ -83,11 +88,17 @@ class AccountState:
 
 @dataclass(frozen=True)
 class CandidateTrade:
-    """Trade the strategy layer is proposing to open."""
+    """Trade the strategy layer is proposing to open.
+
+    (2a: ``intended_regime: RegimeLabel`` renamed to
+    ``intended_day_type: DayType``. 2c-zone rule code keeps the rename
+    transitionally and compares against ``RegimeLabel.TREND`` — the
+    final type cleanup happens in 2c alongside the decision rewrites.)
+    """
 
     pair: str
     intended_direction: Direction
-    intended_regime: RegimeLabel
+    intended_day_type: DayType
     planned_entry_price: float
 
 
@@ -147,12 +158,13 @@ class ForceCloseOrder:
 
 
 # ---------------------------------------------------------------------------
-# Re-export Direction / RegimeLabel for callers that import from here
+# Re-export Direction / DayType / RegimeLabel for callers that import from here
 # ---------------------------------------------------------------------------
 
 __all__ = [
     "AccountState",
     "CandidateTrade",
+    "DayType",
     "Direction",
     "ForceCloseOrder",
     "MarketSnapshot",
@@ -163,6 +175,8 @@ __all__ = [
 ]
 
 
-# Direction and RegimeLabel are imported above; keep references visible so
-# linters do not flag the re-exports as unused.
-_ = (Direction, Optional, RegimeLabel)
+# DayType, Direction and RegimeLabel are imported above; keep references
+# visible so linters do not flag the re-exports as unused. RegimeLabel
+# stays re-exported through 2a/2b — 2c-zone rule code still consults it
+# and tests still construct positions with regime values.
+_ = (DayType, Direction, Optional, RegimeLabel)

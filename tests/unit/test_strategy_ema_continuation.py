@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
+from day_type import DayType
 from regime.labels import Direction, RegimeLabel
 from strategies.ema_continuation import detect_ema_continuation
 from structure_engine import StructureLevel, StructureState
@@ -104,7 +105,7 @@ def test_bearish_acceptance_break_emits_sell() -> None:
     )
     assert sig is not None
     assert sig.direction is Direction.BEARISH
-    assert sig.regime is RegimeLabel.TREND
+    assert sig.day_type is DayType.NORMAL
     assert sig.suggested_tp_price is None
 
 

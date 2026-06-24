@@ -1289,10 +1289,14 @@ class BotLoop:
         # Build the risk-layer inputs.
         latest_prices = self._latest_prices()
         positions = self._collect_open_positions(latest_prices=latest_prices)
+        # 2a: ``intended_regime`` renamed to ``intended_day_type``;
+        # value flows through from ``signal.day_type`` (placeholder
+        # ``DayType.NORMAL`` from strategies until 2b wires the real
+        # day-type via the dispatcher).
         candidate = CandidateTrade(
             pair=signal.pair,
             intended_direction=signal.direction,
-            intended_regime=signal.regime,
+            intended_day_type=signal.day_type,
             planned_entry_price=signal.suggested_entry_price,
         )
         account = AccountState(
@@ -1588,17 +1592,17 @@ class BotLoop:
             f"{signal.suggested_entry_price:.5f} "
             f"SL={signal.suggested_sl_price:.5f} "
             f"strategy={signal.strategy_name} "
-            f"regime={signal.regime} [mode=shadow]"
+            f"day_type={signal.day_type} [mode=shadow]"
         )
         short_text = (
             f"[SHADOW] {side} @ {signal.suggested_entry_price:.5f}"
         )
         logger.info(
             "SHADOW_TRADE would-open: pair=%s side=%s entry=%.5f sl=%.5f "
-            "strategy=%s regime=%s rule=%s",
+            "strategy=%s day_type=%s rule=%s",
             signal.pair, side,
             signal.suggested_entry_price, signal.suggested_sl_price,
-            signal.strategy_name, signal.regime,
+            signal.strategy_name, signal.day_type,
             getattr(decision, "rule", "ok"),
         )
         self._send_alert(
@@ -1616,7 +1620,7 @@ class BotLoop:
                 "suggested_sl": signal.suggested_sl_price,
                 "suggested_tp": signal.suggested_tp_price,
                 "strategy": signal.strategy_name,
-                "regime": str(signal.regime),
+                "day_type": str(signal.day_type),
                 "risk_rule": getattr(decision, "rule", "ok"),
             },
         )

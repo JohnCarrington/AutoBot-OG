@@ -11,6 +11,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
+from day_type import DayType
 from regime.labels import Direction, RegimeLabel
 from strategies.bb_reclaim import detect_bb_reclaim
 from structure_engine import StructureLevel, StructureState
@@ -127,7 +128,7 @@ def test_support_rejection_emits_bullish_signal() -> None:
     )
     assert sig is not None
     assert sig.direction is Direction.BULLISH
-    assert sig.regime is RegimeLabel.RANGE
+    assert sig.day_type is DayType.NORMAL
     assert sig.strategy_name == "bb_reclaim"
     assert sig.confidence_score == pytest.approx(0.85)  # MACD aligned
 

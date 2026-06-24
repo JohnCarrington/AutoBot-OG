@@ -169,7 +169,7 @@ class RiskGuard:
             "pipeline": [],
             "now_utc": now_utc.isoformat(),
             "candidate_pair": candidate.pair,
-            "candidate_regime": candidate.intended_regime.value,
+            "candidate_day_type": candidate.intended_day_type.value,
             "candidate_direction": candidate.intended_direction.value,
         }
 

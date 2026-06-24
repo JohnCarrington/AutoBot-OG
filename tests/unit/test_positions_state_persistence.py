@@ -12,19 +12,23 @@ from execution.state.positions_state import (
     PositionsStateSchemaError,
 )
 from execution.types import ExecutionPosition, SLAmendment
-from regime.labels import Direction, RegimeLabel
+from day_type import DayType
+from regime.labels import Direction
 
 
 _TS = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
 
 
 def _pos(deal_id: str = "D1", **overrides) -> ExecutionPosition:
+    # Persistence parses ``day_type_at_entry`` strictly via ``DayType(value)``
+    # so the field value here must be a DayType member (not RegimeLabel, even
+    # though duck-typing accepts it elsewhere during the 2a/2b transition).
     defaults = dict(
         deal_id=deal_id,
         deal_reference=f"REF_{deal_id}",
         pair="GBPUSD",
         direction=Direction.BULLISH,
-        regime_at_entry=RegimeLabel.TREND,
+        day_type_at_entry=DayType.NORMAL,
         strategy_name="ema_continuation",
         size_units=1.0,
         entry_price=1.30000,
@@ -173,7 +177,7 @@ def test_load_invalid_position_entry_returns_empty(tmp_path: Path) -> None:
     path.write_text(
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,  # current; the entry-validation path
                 "positions": [{"deal_id": "D1"}],  # missing required fields
             }
         ),

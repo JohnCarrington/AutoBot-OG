@@ -559,7 +559,7 @@ def test_force_close_order_executes_close(monkeypatch) -> None:
     bot, pieces = _build(monkeypatch)
     pos = ExecutionPosition(
         deal_id="D1", deal_reference="R1", pair="GBPUSD",
-        direction=Direction.BULLISH, regime_at_entry=RegimeLabel.TREND,
+        direction=Direction.BULLISH, day_type_at_entry=RegimeLabel.TREND,
         strategy_name="ema_continuation",
         size_units=1.0, entry_price=1.30, initial_sl_price=1.298,
         current_sl_price=1.298, suggested_tp_price=None,
@@ -590,7 +590,7 @@ def test_force_close_passes_position_own_direction_bullish(monkeypatch) -> None:
     bot, pieces = _build(monkeypatch)
     pieces["positions"].upsert(ExecutionPosition(
         deal_id="D_BULL", deal_reference="R", pair="GBPUSD",
-        direction=Direction.BULLISH, regime_at_entry=RegimeLabel.TREND,
+        direction=Direction.BULLISH, day_type_at_entry=RegimeLabel.TREND,
         strategy_name="ema_continuation",
         size_units=1.0, entry_price=1.30, initial_sl_price=1.298,
         current_sl_price=1.298, suggested_tp_price=None,
@@ -617,7 +617,7 @@ def test_force_close_passes_position_own_direction_bearish(monkeypatch) -> None:
     bot, pieces = _build(monkeypatch)
     pieces["positions"].upsert(ExecutionPosition(
         deal_id="D_BEAR", deal_reference="R", pair="GBPUSD",
-        direction=Direction.BEARISH, regime_at_entry=RegimeLabel.TREND,
+        direction=Direction.BEARISH, day_type_at_entry=RegimeLabel.TREND,
         strategy_name="ema_continuation",
         size_units=1.0, entry_price=1.30, initial_sl_price=1.302,
         current_sl_price=1.302, suggested_tp_price=None,
@@ -780,11 +780,12 @@ def test_risk_guard_routes_to_correct_pair_engine(monkeypatch) -> None:
     # don't fire a real BAR_CLOSE because the dispatcher would
     # otherwise return [] in the absence of a real strategy setup.)
     from strategies.signal import Signal
-    from regime.labels import Direction, RegimeLabel
+    from day_type import DayType
+    from regime.labels import Direction
     sig = Signal(
         pair="GBPUSD",
         direction=Direction.BULLISH,
-        regime=RegimeLabel.TREND,
+        day_type=DayType.NORMAL,
         strategy_name="ema_continuation",
         suggested_entry_price=1.3,
         suggested_sl_price=1.298,
@@ -1237,7 +1238,7 @@ def test_no_alerter_wired_does_not_raise_on_any_path(monkeypatch) -> None:
     pos = ExecutionPosition(
         deal_id="DEAL_NA1", deal_reference="REF",
         pair="GBPUSD", direction=Direction.BULLISH,
-        regime_at_entry=RegimeLabel.TREND, strategy_name="trend_break",
+        day_type_at_entry=RegimeLabel.TREND, strategy_name="trend_break",
         size_units=1.0, entry_price=1.30050,
         initial_sl_price=1.29900, current_sl_price=1.29900,
         suggested_tp_price=1.30450,
@@ -1291,7 +1292,7 @@ def test_force_close_emits_trade_closed_and_records_in_deal_log(monkeypatch) -> 
     pos = ExecutionPosition(
         deal_id="DEAL_FC1", deal_reference="REF",
         pair="GBPUSD", direction=Direction.BULLISH,
-        regime_at_entry=RegimeLabel.TREND, strategy_name="trend_break",
+        day_type_at_entry=RegimeLabel.TREND, strategy_name="trend_break",
         size_units=1.0, entry_price=1.30050,
         initial_sl_price=1.29900, current_sl_price=1.29900,
         suggested_tp_price=1.30450,
@@ -1329,7 +1330,7 @@ def test_force_close_rejected_does_not_emit_trade_closed(monkeypatch) -> None:
     pos = ExecutionPosition(
         deal_id="DEAL_FC2", deal_reference="REF",
         pair="GBPUSD", direction=Direction.BULLISH,
-        regime_at_entry=RegimeLabel.TREND, strategy_name="trend_break",
+        day_type_at_entry=RegimeLabel.TREND, strategy_name="trend_break",
         size_units=1.0, entry_price=1.30050,
         initial_sl_price=1.29900, current_sl_price=1.29900,
         suggested_tp_price=1.30450,

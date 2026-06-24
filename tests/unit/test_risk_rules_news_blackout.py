@@ -23,7 +23,7 @@ def _candidate(pair: str = "GBPUSD") -> CandidateTrade:
     return CandidateTrade(
         pair=pair,
         intended_direction=Direction.BULLISH,
-        intended_regime=RegimeLabel.TREND,
+        intended_day_type=RegimeLabel.TREND,
         planned_entry_price=1.30,
     )
 

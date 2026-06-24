@@ -134,7 +134,7 @@ class Executor:
             entry_price=signal.suggested_entry_price,
             sl_price=signal.suggested_sl_price,
             tp_price=signal.suggested_tp_price,
-            regime_at_entry=signal.regime,
+            day_type_at_entry=signal.day_type,
             strategy_name=signal.strategy_name,
             signal_source_candle_ts=signal.source_candle_ts,
         )
@@ -416,7 +416,7 @@ class Executor:
                     debug={
                         "deal_id": position.deal_id,
                         "strategy": order.strategy_name,
-                        "regime": str(order.regime_at_entry),
+                        "day_type": str(order.day_type_at_entry),
                     },
                 )
             )
@@ -536,7 +536,7 @@ def _build_position(
         deal_reference=confirmation.deal_reference,
         pair=order.pair,
         direction=order.direction,
-        regime_at_entry=order.regime_at_entry,
+        day_type_at_entry=order.day_type_at_entry,
         strategy_name=order.strategy_name,
         size_units=order.size_units,
         entry_price=float(entry_price),

@@ -25,7 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from regime.labels import Direction, RegimeLabel
+from day_type import DayType
+from regime.labels import Direction
 
 from ..constants import EXECUTION_STATE_PATH
 from ..types import ExecutionPosition, SLAmendment
@@ -35,7 +36,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_STATE_PATH: Path = Path(EXECUTION_STATE_PATH)
 
-_CURRENT_SCHEMA_VERSION = 1
+# v2 (2a clean-swap): ``regime_at_entry`` renamed to ``day_type_at_entry``
+# and re-typed to :class:`day_type.DayType`. Any pre-v2 positions.json on
+# disk fails the version check in ``_deserialize`` → ``PositionsStateSchemaError``
+# → ``load`` returns empty state (fail-open). Demo bot, no migration.
+_CURRENT_SCHEMA_VERSION = 2
 
 
 class PositionsStateSchemaError(RuntimeError):
@@ -207,7 +212,7 @@ def _position_to_dict(p: ExecutionPosition) -> dict:
         "deal_reference": p.deal_reference,
         "pair": p.pair,
         "direction": p.direction.value,
-        "regime_at_entry": p.regime_at_entry.value,
+        "day_type_at_entry": p.day_type_at_entry.value,
         "strategy_name": p.strategy_name,
         "size_units": p.size_units,
         "entry_price": p.entry_price,
@@ -269,7 +274,7 @@ def _dict_to_position(entry: dict) -> ExecutionPosition:
             deal_reference=str(entry["deal_reference"]),
             pair=str(entry["pair"]),
             direction=Direction(entry["direction"]),
-            regime_at_entry=RegimeLabel(entry["regime_at_entry"]),
+            day_type_at_entry=DayType(entry["day_type_at_entry"]),
             strategy_name=str(entry["strategy_name"]),  # type: ignore[arg-type]
             size_units=float(entry["size_units"]),
             entry_price=float(entry["entry_price"]),

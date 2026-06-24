@@ -14,7 +14,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Literal, Mapping, Optional
 
-from regime.labels import Direction, RegimeLabel
+from day_type import DayType
+from regime.labels import Direction
 
 from .constants import M5_BAR_MINUTES
 
@@ -41,11 +42,18 @@ class Signal:
         ``Direction.BULLISH`` for longs, ``Direction.BEARISH`` for
         shorts. ``Direction.NEUTRAL`` is **not** valid here — a Signal
         always has a side.
-    regime : RegimeLabel
-        The regime under which this setup was detected. Used by
+    day_type : DayType
+        The day-type under which this setup was detected. Used by
         downstream consumers to disambiguate strategy intent
         (TREND positions can hold overnight Mon-Thu; RANGE/VOLATILE
-        cannot — see ``risk/rules/eod_enforcement.py``).
+        cannot — see ``risk/rules/eod_enforcement.py``). (2a: field
+        renamed from ``regime: RegimeLabel`` to ``day_type: DayType``.
+        Strategies currently populate ``DayType.NORMAL`` as a placeholder
+        — 2b wires the real day-type via the dispatcher. The legacy
+        regime-based EOD carve-out remains in eod_enforcement.py until
+        2c — strategy-pipeline tests that exercise EOD still construct
+        ``ExecutionPosition`` with explicit regime values to drive that
+        carve-out.)
     strategy_name : StrategyName
         Identifier for the strategy that produced the signal.
     suggested_entry_price : float
@@ -81,7 +89,7 @@ class Signal:
 
     pair: str
     direction: Direction
-    regime: RegimeLabel
+    day_type: DayType
     strategy_name: StrategyName
     suggested_entry_price: float
     suggested_sl_price: float

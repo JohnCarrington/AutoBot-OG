@@ -538,6 +538,29 @@ def hydrate_pair(
     # the buffer populated with bars that aren't durable. With this
     # order an archive failure propagates up before the buffer mutates,
     # and ``hydrate_pairs`` reports the pair as ``failed`` cleanly.
+    #
+    # H1 forming-bar guard (HOUR resolution only). IG's HOUR history
+    # endpoint includes the in-progress hour as its newest row;
+    # parse_ig_history labels it close_time = snapshotTime + 1h, i.e.
+    # up to ~1h in the future. Left in, that bar becomes the H1
+    # RollingBuffer's tail and blocks _maybe_push_synthesised_h1's
+    # in-place replace — every live M5 close then logs an out-of-order
+    # push rejection. Drop any REST bar whose close_time is past now
+    # (+60s tolerance). Covers rest_only and cache_plus_rest (both
+    # populate rest_bars); filtering here also keeps the forming bar
+    # out of the archive, so a later cache_only boot stays clean. M5
+    # is untouched — its forming bar is handled by the live feed.
+    if resolution == "HOUR" and rest_bars:
+        forming_cutoff = clock() + timedelta(seconds=60)
+        kept = [c for c in rest_bars if c.close_time <= forming_cutoff]
+        dropped = len(rest_bars) - len(kept)
+        if dropped:
+            logger.info(
+                "hydrate_pair(%s): dropped %d forming H1 bar(s) "
+                "(close_time past %s)",
+                pair, dropped, forming_cutoff.isoformat(),
+            )
+        rest_bars = kept
     combined: list[Candle] = list(cached)
     if rest_bars:
         combined.extend(rest_bars)

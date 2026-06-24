@@ -38,7 +38,7 @@ def _candidate(pair: str = "GBPUSD") -> CandidateTrade:
     return CandidateTrade(
         pair=pair,
         intended_direction=Direction.BULLISH,
-        intended_regime=RegimeLabel.TREND,
+        intended_day_type=RegimeLabel.TREND,
         planned_entry_price=1.30,
     )
 
@@ -54,7 +54,7 @@ def _pos(pnl_r: float, pair: str = "GBPUSD") -> OpenPosition:
         position_id="p1",
         pair=pair,
         direction=Direction.BULLISH,
-        regime_at_entry=RegimeLabel.TREND,
+        day_type_at_entry=RegimeLabel.TREND,
         entry_price=1.30,
         current_price=1.31,
         entry_time_utc=_now(),

@@ -16,6 +16,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Literal, Optional
 
+from day_type import DayType
 from regime.labels import Direction, RegimeLabel
 from risk.types import OpenPosition as RiskOpenPosition
 from strategies.signal import StrategyName
@@ -70,11 +71,13 @@ class ExecutionPosition:
         confirmation lands; ``deal_reference`` is our submission
         nonce (kept as a fallback when the deal_id has not been
         observed yet).
-    pair, direction, regime_at_entry, strategy_name
-        Trade metadata captured at open time. ``regime_at_entry``
+    pair, direction, day_type_at_entry, strategy_name
+        Trade metadata captured at open time. ``day_type_at_entry``
         drives EOD enforcement; ``strategy_name`` drives the
         SL-trail rule selection (BB Reclaim → EMA20 primary,
-        TREND / VOLATILE → swing primary).
+        TREND / VOLATILE → swing primary). (2a: ``regime_at_entry``
+        renamed to ``day_type_at_entry``; field carries day-type info
+        in the long-run, regime values transitionally until 2c.)
     size_units
         IG-side size (e.g. ``1.0`` spreadbet unit). Pips per unit
         depend on the pair via :py:func:`config.pair_config.get_ppp`.
@@ -109,7 +112,7 @@ class ExecutionPosition:
     deal_reference: str
     pair: str
     direction: Direction
-    regime_at_entry: RegimeLabel
+    day_type_at_entry: DayType
     strategy_name: StrategyName
     size_units: float
     entry_price: float
@@ -152,7 +155,7 @@ class ExecutionPosition:
             position_id=self.deal_id,
             pair=self.pair,
             direction=self.direction,
-            regime_at_entry=self.regime_at_entry,
+            day_type_at_entry=self.day_type_at_entry,
             entry_price=self.entry_price,
             current_price=current_price,
             entry_time_utc=self.entry_time_utc,
@@ -249,7 +252,7 @@ class TradeOrder:
     entry_price: float  # for diagnostics only — actual fill comes from confirm
     sl_price: float
     tp_price: Optional[float]
-    regime_at_entry: RegimeLabel
+    day_type_at_entry: DayType
     strategy_name: StrategyName
     signal_source_candle_ts: datetime
 

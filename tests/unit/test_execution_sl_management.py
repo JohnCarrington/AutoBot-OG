@@ -21,7 +21,7 @@ def _pos(**overrides) -> ExecutionPosition:
         deal_reference="REF",
         pair="GBPUSD",
         direction=Direction.BULLISH,
-        regime_at_entry=RegimeLabel.TREND,
+        day_type_at_entry=RegimeLabel.TREND,
         strategy_name="ema_continuation",
         size_units=1.0,
         entry_price=1.30000,

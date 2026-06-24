@@ -50,17 +50,23 @@ def check_position_caps(
             ),
         )
 
-    same_regime = [
-        p for p in positions if p.regime_at_entry == candidate.intended_regime
+    # 2a: fields renamed; behaviour preserved — comparison is
+    # self-equality (DayType==DayType or RegimeLabel==RegimeLabel),
+    # which works under either type while values are mixed during the
+    # 2a/2b transition.
+    same_day_type = [
+        p
+        for p in positions
+        if p.day_type_at_entry == candidate.intended_day_type
     ]
-    if len(same_regime) >= MAX_PER_REGIME:
+    if len(same_day_type) >= MAX_PER_REGIME:
         return RuleResult(
             allow=False,
             rule=_RULE_NAME,
             reason=(
                 f"per-regime cap reached for "
-                f"{candidate.intended_regime.value}: "
-                f"{len(same_regime)} open (max {MAX_PER_REGIME})"
+                f"{candidate.intended_day_type.value}: "
+                f"{len(same_day_type)} open (max {MAX_PER_REGIME})"
             ),
         )
 

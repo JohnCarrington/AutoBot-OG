@@ -45,6 +45,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
+from typing import Iterable
+
 from .finnhub_client import FINNHUB_ENABLED, fetch_calendar
 from .impact import (
     DEVIATION_THRESHOLD,
@@ -55,6 +57,17 @@ from .impact import (
     parse_impact,
 )
 from .matcher import countries_for_currency, match_event
+
+
+# Impact ordinals for `events_in_window`'s `impact_min` floor. HIGH is the
+# most blocking; LOW the least. Kept local to this module — the public
+# `Impact` enum is intentionally not ordered (callers reason about it via
+# explicit checks elsewhere).
+_IMPACT_RANK: dict[Impact, int] = {
+    Impact.HIGH: 2,
+    Impact.MEDIUM: 1,
+    Impact.LOW: 0,
+}
 
 
 logger = logging.getLogger(__name__)
@@ -449,6 +462,67 @@ def is_blackout(
 
 
 # ---------------------------------------------------------------------------
+# Window query (used by the day-type classifier)
+# ---------------------------------------------------------------------------
+
+def events_in_window(
+    currencies: Iterable[str],
+    start_utc: datetime,
+    end_utc: datetime,
+    *,
+    impact_min: Impact = Impact.HIGH,
+) -> list[dict[str, Any]]:
+    """Return cached events whose ``time`` lies in ``[start_utc, end_utc]``.
+
+    Country gating reuses :py:func:`matcher.countries_for_currency` — the
+    union of allowed countries across ``currencies`` is the match set.
+    Unknown currencies contribute nothing (no country added); an entirely
+    unknown set returns ``[]``.
+
+    Impact gating keeps events at ``impact_min`` or higher in the
+    HIGH > MEDIUM > LOW order. Default is HIGH-only, matching the
+    day-type classifier's "big news" definition.
+
+    Boundaries are inclusive on both ends, mirroring
+    :py:func:`is_blackout`'s window semantics. Naive ``start_utc`` /
+    ``end_utc`` are interpreted as UTC.
+
+    Note: this query does NOT fail-closed on a stale cache. Staleness
+    policy is the caller's concern (the day-type classifier wraps it).
+    Returns whatever the cache currently holds.
+    """
+    allowed_countries: set[str] = set()
+    for cur in currencies:
+        countries = countries_for_currency(cur)
+        if countries is not None:
+            allowed_countries.update(countries)
+    if not allowed_countries:
+        return []
+    impact_floor = _IMPACT_RANK[impact_min]
+
+    if start_utc.tzinfo is None:
+        start_utc = start_utc.replace(tzinfo=timezone.utc)
+    if end_utc.tzinfo is None:
+        end_utc = end_utc.replace(tzinfo=timezone.utc)
+
+    with _lock:
+        events = list(_cache.get("events", []))
+
+    out: list[dict[str, Any]] = []
+    for ev in events:
+        if ev.get("country") not in allowed_countries:
+            continue
+        if _IMPACT_RANK[parse_impact(ev.get("impact"))] < impact_floor:
+            continue
+        ev_time = _parse_event_time(ev.get("time", ""))
+        if ev_time is None:
+            continue
+        if start_utc <= ev_time <= end_utc:
+            out.append(ev)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Test-only helpers. Prefixed with _ to signal "not part of the public API";
 # the alternative is to let tests poke ``_cache`` directly, which couples
 # tests to the cache structure. Keeping the seam here is cheap and lets the
@@ -490,4 +564,5 @@ __all__ = [
     "cache_staleness_seconds",
     "get_actual_for_event",
     "is_blackout",
+    "events_in_window",
 ]

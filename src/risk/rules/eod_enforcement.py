@@ -77,8 +77,11 @@ def check_pre_eod_suppression(
 
     # Inside the buffer. TREND can survive overnight on Mon-Thu, so only
     # reject TREND inside the Friday buffer.
+    # (2a: field renamed to ``intended_day_type``; comparison value
+    # remains ``RegimeLabel.TREND`` because the existing decision logic
+    # is regime-based — 2c rewrites the carve-out for day-type semantics.)
     ny_weekday = _ny_now(now_utc).weekday()
-    if candidate.intended_regime == RegimeLabel.TREND and ny_weekday != _FRIDAY:
+    if candidate.intended_day_type == RegimeLabel.TREND and ny_weekday != _FRIDAY:
         return RuleResult(allow=True, rule=_RULE_NAME, reason="ok")
 
     return RuleResult(
@@ -87,7 +90,7 @@ def check_pre_eod_suppression(
         reason=(
             f"pre_eod_suppression: {minutes_to_close:.1f}min to NY close "
             f"(buffer={PRE_EOD_NO_ENTRY_MIN}min); "
-            f"regime={candidate.intended_regime.value}, "
+            f"day_type={candidate.intended_day_type.value}, "
             f"weekday={ny_weekday}"
         ),
     )
@@ -142,12 +145,14 @@ def apply_eod_force_close(
     orders: list[ForceCloseOrder] = []
     for pos in positions:
         # Non-trend regimes always close at NY close.
-        if pos.regime_at_entry != RegimeLabel.TREND:
+        # (2a: field renamed to ``day_type_at_entry``; comparison value
+        # remains ``RegimeLabel.TREND`` — 2c rewrites the carve-out.)
+        if pos.day_type_at_entry != RegimeLabel.TREND:
             orders.append(
                 ForceCloseOrder(
                     position_id=pos.position_id,
                     pair=pos.pair,
-                    reason=f"eod_close: regime={pos.regime_at_entry.value}",
+                    reason=f"eod_close: day_type={pos.day_type_at_entry.value}",
                 )
             )
             continue

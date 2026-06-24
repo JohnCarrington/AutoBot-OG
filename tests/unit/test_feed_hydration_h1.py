@@ -415,3 +415,46 @@ def test_h1_leg_raises_does_not_poison_m5(tmp_path: Path) -> None:
     # the loop dispatcher route to the buffer instead of the legacy
     # path and serve stale / partial bars.
     assert len(buf_h1) == 0
+
+
+# ---------------------------------------------------------------------------
+# Forming-bar guard — REST payload's in-progress hour is dropped
+# ---------------------------------------------------------------------------
+
+
+def test_h1_rest_only_drops_forming_bar(tmp_path: Path) -> None:
+    """A REST HOUR payload whose newest bar is the in-progress hour
+    (close_time in the future) must have that bar dropped before it
+    reaches the buffer/archive — left in, it poisons the H1 buffer
+    tail and blocks the live synthesised-H1 in-place replace.
+    """
+    pair = "GBPUSD"
+    archive = CandleArchive(
+        pair, base_dir=tmp_path, template=FEED_ARCHIVE_CSV_TEMPLATE_H1,
+    )
+    buf = RollingBuffer(pair, capacity=80)
+
+    # 72 completed bars (closes _NOW-71h .. _NOW) PLUS one forming bar:
+    # _ig_h1_price(72) has open_t == _NOW, so close_time == _NOW + 1h.
+    payload = _ig_h1_payload(n=72)
+    payload["prices"].append(_ig_h1_price(72))
+
+    report = hydrate_pair(
+        pair, "CS.D.GBPUSD.TODAY.IP",
+        archive=archive, buffer=buf,
+        fetcher=lambda epic, resolution, n: payload,
+        now_utc=lambda: _NOW,
+        backfill_bars=72,
+        resolution="HOUR",
+    )
+
+    assert report.mode == "rest_only"
+    # 73 parsed, forming bar dropped → 72 kept.
+    assert report.rest_bars == 72
+    assert report.final_buffer_size == 72
+    snap = buf.snapshot()
+    assert all(c.close_time <= _NOW for c in snap)
+    assert snap[-1].close_time == _NOW
+    # The dropped bar was genuinely future-dated (close == _NOW + 1h).
+    forming_close = _NOW + timedelta(hours=1)
+    assert forming_close not in {c.close_time for c in snap}

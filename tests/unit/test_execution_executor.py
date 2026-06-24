@@ -24,6 +24,7 @@ from feed.ig_rest.types import (
     DealConfirmation,
     OrderRequest,
 )
+from day_type import DayType
 from regime.labels import Direction, RegimeLabel
 from strategies.signal import Signal
 
@@ -123,7 +124,7 @@ def _ig_signal(**overrides) -> Signal:
     defaults = dict(
         pair="GBPUSD",
         direction=Direction.BULLISH,
-        regime=RegimeLabel.TREND,
+        day_type=DayType.NORMAL,
         strategy_name="ema_continuation",
         suggested_entry_price=1.30000,
         suggested_sl_price=1.29850,

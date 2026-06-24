@@ -11,6 +11,7 @@ from typing import Callable
 import pandas as pd
 import pytest
 
+from day_type import DayType
 from regime.labels import Direction, RegimeLabel
 from strategies import dispatcher
 from strategies.signal import Signal, compute_invalid_after
@@ -41,11 +42,11 @@ def _stub_structure_state() -> StructureState:
     )
 
 
-def _stub_signal(strategy_name: str, regime: RegimeLabel) -> Signal:
+def _stub_signal(strategy_name: str, regime: RegimeLabel) -> Signal:  # noqa: ARG001 — regime arg unused in 2a (placeholder day_type), kept for caller-symmetry until 2b
     return Signal(
         pair="GBPUSD",
         direction=Direction.BULLISH,
-        regime=regime,
+        day_type=DayType.NORMAL,
         strategy_name=strategy_name,  # type: ignore[arg-type]
         suggested_entry_price=1.30000,
         suggested_sl_price=1.29850,

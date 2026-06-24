@@ -33,7 +33,7 @@ def _pos(
         deal_reference=f"REF_{deal_id}",
         pair=pair,
         direction=Direction.BULLISH,
-        regime_at_entry=RegimeLabel.TREND,
+        day_type_at_entry=RegimeLabel.TREND,
         strategy_name="ema_continuation",
         size_units=1.0,
         entry_price=1.30000,

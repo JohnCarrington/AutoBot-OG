@@ -23,6 +23,7 @@ import pytest
 
 from bot.loop import BotLoop
 from bot.types import BotState
+from day_type import DayType
 from regime.labels import Direction, RegimeLabel
 from strategies.signal import Signal
 
@@ -39,7 +40,7 @@ def _signal(
     return Signal(
         pair=pair,
         direction=direction,
-        regime=RegimeLabel.TREND,
+        day_type=DayType.NORMAL,
         strategy_name="ema_continuation",
         suggested_entry_price=suggested_entry_price,
         suggested_sl_price=suggested_sl_price,
@@ -258,7 +259,7 @@ def _seed_position(pieces) -> str:
         deal_reference="REF",
         pair="GBPUSD",
         direction=Direction.BULLISH,
-        regime_at_entry=RegimeLabel.TREND,
+        day_type_at_entry=RegimeLabel.TREND,
         strategy_name="trend_break",
         size_units=1.0,
         entry_price=1.30050,

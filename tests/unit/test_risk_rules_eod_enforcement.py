@@ -18,7 +18,7 @@ def _candidate(regime: RegimeLabel = RegimeLabel.RANGE) -> CandidateTrade:
     return CandidateTrade(
         pair="GBPUSD",
         intended_direction=Direction.BULLISH,
-        intended_regime=regime,
+        intended_day_type=regime,
         planned_entry_price=1.30,
     )
 
@@ -35,7 +35,7 @@ def _pos(
         position_id=pid,
         pair="GBPUSD",
         direction=direction,
-        regime_at_entry=regime,
+        day_type_at_entry=regime,
         entry_price=1.30,
         current_price=1.31,
         entry_time_utc=(

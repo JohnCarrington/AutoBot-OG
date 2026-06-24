@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import pytest
 
+from day_type import DayType
 from regime.labels import Direction, RegimeLabel
 from strategies.liquidity_sweep import detect_liquidity_sweep
 from structure_engine import StructureLevel, StructureState
@@ -104,7 +105,7 @@ def test_support_sweep_reclaim_with_liquidity_below_emits_buy() -> None:
     )
     assert sig is not None
     assert sig.direction is Direction.BULLISH
-    assert sig.regime is RegimeLabel.VOLATILE
+    assert sig.day_type is DayType.NORMAL
 
 
 def test_resistance_sweep_reclaim_with_liquidity_above_emits_sell() -> None:

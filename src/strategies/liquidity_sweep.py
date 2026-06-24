@@ -35,6 +35,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from config.pair_config import MIN_SL_PIPS, pip_size_for, price_to_pips
+from day_type import DayType
 from regime.labels import Direction, RegimeLabel
 from regime.state import RegimeState
 from structure_engine import StructureLevel, StructureState
@@ -148,7 +149,9 @@ def detect_liquidity_sweep(
     return Signal(
         pair=pair.upper(),
         direction=direction,
-        regime=RegimeLabel.VOLATILE,
+        # 2a bridge: placeholder day-type until 2b wires the dispatcher's
+        # day-type input to the strategy. 2b removes this placeholder.
+        day_type=DayType.NORMAL,
         strategy_name=_STRATEGY_NAME,
         suggested_entry_price=entry_price,
         suggested_sl_price=sl_price,
