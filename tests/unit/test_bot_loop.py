@@ -199,50 +199,20 @@ class _FakePositionManager:
 
 
 class _FakeRiskGuard:
-    """Stand-in for RiskGuard that actually consults a regime engine.
+    """Stand-in for RiskGuard — records calls, returns canned decisions.
 
-    The original C2 bug shipped because the fake just recorded
-    ``allow_entry`` calls without ever touching the engine — a stale
-    engine couldn't be detected at all. This rewrite mirrors the real
-    surface: every entry decision calls ``engine.is_live()`` and
-    ``engine.get_recent_emissions(window_minutes, now_utc)``, exactly
-    like ``risk.guard.RiskGuard.allow_entry``. Per-pair routing flows
-    via ``engine_for_pair`` (Option A from the review prompt).
+    2d: the real RiskGuard no longer consults a regime engine, so the
+    fake no longer tries to either. The structure_state_for_pair
+    callable is what drives the EOD decision now (B-1 / 2c).
     """
 
-    def __init__(
-        self,
-        *,
-        engine_for_pair=None,
-        engine=None,
-    ) -> None:
-        self._engine_for_pair = engine_for_pair
-        self._engine = engine
+    def __init__(self) -> None:
         self.allow_calls: list = []
         self.force_close_calls: list = []
-        # (pair, is_live, len(recent_emissions)) recorded on every
-        # allow_entry call — tests assert the *routing*, not just the
-        # decision.
-        self.observed_engine_lookups: list = []
         self.allow_result = None  # set per test
         self.force_close_result: list = []
 
-    def _resolve_engine(self, pair: str):
-        if self._engine_for_pair is not None:
-            return self._engine_for_pair(pair)
-        return self._engine
-
     def allow_entry(self, *, candidate, positions, account, market, now_utc):
-        eng = self._resolve_engine(candidate.pair)
-        is_live = eng.is_live() if eng is not None else False
-        recent = (
-            eng.get_recent_emissions(window_minutes=60, now_utc=now_utc)
-            if eng is not None
-            else []
-        )
-        self.observed_engine_lookups.append(
-            (candidate.pair, is_live, len(recent))
-        )
         self.allow_calls.append(
             {
                 "candidate": candidate,
@@ -259,10 +229,6 @@ class _FakeRiskGuard:
     def positions_to_force_close(
         self, *, positions, now_utc, structure_state_for_pair=None,
     ):
-        # 2c (B-3): the real RiskGuard no longer consults the regime
-        # engine. The fake keeps engine routing only for the C2 identity
-        # tests below; the production overnight-hold decision is driven
-        # by structure_state_for_pair (htf_bias per pair).
         if structure_state_for_pair is not None:
             for pos in positions:
                 try:
@@ -322,15 +288,8 @@ def _build(
     *,
     pairs=("GBPUSD",),
     clock=None,
-    regime_engines=None,
 ) -> tuple[BotLoop, dict]:
-    """Construct a BotLoop with all fakes injected, plus a `pieces` dict for assertions.
-
-    ``regime_engines`` lets tests pre-seed the per-pair engine map so
-    they can reach into the same instance the BotLoop uses (identity
-    asserts) and also pass the corresponding ``engine_for_pair`` lambda
-    to ``_FakeRiskGuard``.
-    """
+    """Construct a BotLoop with all fakes injected, plus a `pieces` dict for assertions."""
     feed = _FakeFeed()
     # Seed with enough candles that resample produces an H1.
     seed = [_candle("GBPUSD", -i) for i in range(60, 0, -1)]
@@ -341,16 +300,7 @@ def _build(
     executor = _FakeExecutor()
     pm = _FakePositionManager()
 
-    # Build per-pair engines if not supplied — these become BOTH the
-    # BotLoop's internal engines AND the _FakeRiskGuard's routing
-    # source. This pairs with the C2 fix: identity must be shared.
-    from regime.engine import RegimeEngine
-    engines = (
-        dict(regime_engines)
-        if regime_engines is not None
-        else {p: RegimeEngine() for p in pairs}
-    )
-    rg = _FakeRiskGuard(engine_for_pair=lambda pair: engines[pair])
+    rg = _FakeRiskGuard()
 
     # Neutralise fetch_market_info to avoid touching the IG layer.
     import bot.loop as loop_mod
@@ -367,12 +317,11 @@ def _build(
         position_manager=pm,         # type: ignore[arg-type]
         pairs=tuple(pairs),
         pair_to_epic={p: f"CS.D.{p}.TODAY.IP" for p in pairs},
-        regime_engines=engines,
         clock=clock or (lambda: _NOW),
     )
     return bot, {
         "feed": feed, "ig": ig, "executor": executor,
-        "positions": pm, "risk": rg, "engines": engines,
+        "positions": pm, "risk": rg,
     }
 
 
@@ -564,13 +513,14 @@ def test_force_close_called_on_every_bar_close(monkeypatch) -> None:
 
 
 def test_force_close_order_executes_close(monkeypatch) -> None:
-    from regime.labels import Direction, RegimeLabel
+    from common import Direction
+    from day_type import DayType
     from execution.types import ExecutionPosition
 
     bot, pieces = _build(monkeypatch)
     pos = ExecutionPosition(
         deal_id="D1", deal_reference="R1", pair="GBPUSD",
-        direction=Direction.BULLISH, day_type_at_entry=RegimeLabel.TREND,
+        direction=Direction.BULLISH, day_type_at_entry=DayType.NORMAL,
         strategy_name="ema_pullback",
         size_units=1.0, entry_price=1.30, initial_sl_price=1.298,
         current_sl_price=1.298, suggested_tp_price=None,
@@ -594,14 +544,15 @@ def test_force_close_order_executes_close(monkeypatch) -> None:
 
 def test_force_close_passes_position_own_direction_bullish(monkeypatch) -> None:
     """C1 regression: BULLISH position closes with position_direction="BUY"."""
-    from regime.labels import Direction, RegimeLabel
+    from common import Direction
+    from day_type import DayType
     from execution.types import ExecutionPosition
     from risk.types import ForceCloseOrder
 
     bot, pieces = _build(monkeypatch)
     pieces["positions"].upsert(ExecutionPosition(
         deal_id="D_BULL", deal_reference="R", pair="GBPUSD",
-        direction=Direction.BULLISH, day_type_at_entry=RegimeLabel.TREND,
+        direction=Direction.BULLISH, day_type_at_entry=DayType.NORMAL,
         strategy_name="ema_pullback",
         size_units=1.0, entry_price=1.30, initial_sl_price=1.298,
         current_sl_price=1.298, suggested_tp_price=None,
@@ -621,14 +572,15 @@ def test_force_close_passes_position_own_direction_bullish(monkeypatch) -> None:
 
 def test_force_close_passes_position_own_direction_bearish(monkeypatch) -> None:
     """C1 regression: BEARISH position closes with position_direction="SELL"."""
-    from regime.labels import Direction, RegimeLabel
+    from common import Direction
+    from day_type import DayType
     from execution.types import ExecutionPosition
     from risk.types import ForceCloseOrder
 
     bot, pieces = _build(monkeypatch)
     pieces["positions"].upsert(ExecutionPosition(
         deal_id="D_BEAR", deal_reference="R", pair="GBPUSD",
-        direction=Direction.BEARISH, day_type_at_entry=RegimeLabel.TREND,
+        direction=Direction.BEARISH, day_type_at_entry=DayType.NORMAL,
         strategy_name="ema_pullback",
         size_units=1.0, entry_price=1.30, initial_sl_price=1.302,
         current_sl_price=1.302, suggested_tp_price=None,
@@ -766,33 +718,24 @@ def test_handler_short_circuits_when_shutting_down(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# C2 — RiskGuard / BotLoop regime engine sharing
+# Signal routing — candidate carries the pair the dispatcher fired on
 # ---------------------------------------------------------------------------
 
 
-def test_risk_guard_routes_to_correct_pair_engine(monkeypatch) -> None:
-    """C2 regression: a GBPUSD signal queries the GBPUSD engine, not EURUSD.
+def test_evaluate_and_execute_passes_signal_pair_to_risk(monkeypatch) -> None:
+    """A GBPUSD signal arrives at risk.allow_entry as a GBPUSD candidate.
 
-    Both engines exist (per-pair map); the routing path is
-    engine_for_pair(candidate.pair). The fake's observed_engine_lookups
-    records (pair, is_live, recent_count) for each allow_entry call —
-    the test asserts the pair matches the candidate.
+    Replaces the old C2 engine-routing test — 2d deleted the regime
+    engine, so there's no engine to route. What remains worth pinning:
+    the candidate the risk guard sees carries the same pair as the
+    originating signal.
     """
-    from regime.engine import RegimeEngine
-    engines = {"GBPUSD": RegimeEngine(), "EURUSD": RegimeEngine()}
-    bot, pieces = _build(
-        monkeypatch, pairs=("GBPUSD", "EURUSD"), regime_engines=engines,
-    )
+    bot, pieces = _build(monkeypatch, pairs=("GBPUSD", "EURUSD"))
     bot.start()
     bot.mark_ready()
-
-    # Manually trigger a signal pipeline run with a known pair by
-    # invoking _evaluate_and_execute via a constructed Signal. (We
-    # don't fire a real BAR_CLOSE because the dispatcher would
-    # otherwise return [] in the absence of a real strategy setup.)
     from strategies.signal import Signal
     from day_type import DayType
-    from regime.labels import Direction
+    from common import Direction
     sig = Signal(
         pair="GBPUSD",
         direction=Direction.BULLISH,
@@ -807,31 +750,8 @@ def test_risk_guard_routes_to_correct_pair_engine(monkeypatch) -> None:
         debug={},
     )
     bot._evaluate_and_execute(sig)  # type: ignore[attr-defined]
-    # The fake records (pair, is_live, recent_count) per call.
-    assert len(pieces["risk"].observed_engine_lookups) == 1
-    routed_pair, _, _ = pieces["risk"].observed_engine_lookups[0]
-    assert routed_pair == "GBPUSD"
-
-
-def test_bot_loop_and_risk_guard_share_engine_instance_identity(
-    monkeypatch,
-) -> None:
-    """C2 regression: identity check, not just behaviour.
-
-    Every prior-phase test verified outcomes; this one verifies the
-    wiring. The same RegimeEngine instance must be reachable from
-    both BotLoop.regime_engine_for and the engine_for_pair callable
-    the FakeRiskGuard was constructed with.
-    """
-    from regime.engine import RegimeEngine
-    engines = {"GBPUSD": RegimeEngine()}
-    bot, pieces = _build(monkeypatch, regime_engines=engines)
-    # BotLoop's per-pair engine IS the dict entry.
-    assert bot.regime_engine_for("GBPUSD") is engines["GBPUSD"]
-    # The FakeRiskGuard was wired with engine_for_pair=lambda p: engines[p].
-    # Resolve via its accessor and confirm same instance.
-    resolved = pieces["risk"]._engine_for_pair("GBPUSD")
-    assert resolved is engines["GBPUSD"]
+    assert len(pieces["risk"].allow_calls) == 1
+    assert pieces["risk"].allow_calls[0]["candidate"].pair == "GBPUSD"
 
 
 # ---------------------------------------------------------------------------
@@ -1039,17 +959,15 @@ def _build_with_alerter(monkeypatch, **kw) -> tuple:
     # Re-construct via the public API rather than reaching into _build —
     # _build returns a constructed bot, but the alerter must be passed
     # at construction. Easier path: rebuild from the existing pieces.
-    from regime.engine import RegimeEngine
-    engines = pieces["engines"]
+    pairs = kw.get("pairs", ("GBPUSD",))
     bot = BotLoop(
         feed_manager=pieces["feed"],
         ig_client=pieces["ig"],
         executor=pieces["executor"],
         risk_guard=pieces["risk"],
         position_manager=pieces["positions"],
-        pairs=tuple(engines.keys()),
-        pair_to_epic={p: f"CS.D.{p}.TODAY.IP" for p in engines.keys()},
-        regime_engines=engines,
+        pairs=tuple(pairs),
+        pair_to_epic={p: f"CS.D.{p}.TODAY.IP" for p in pairs},
         clock=lambda: _NOW,
         alerter=alerter,  # type: ignore[arg-type]
     )
@@ -1224,12 +1142,13 @@ def test_no_alerter_wired_does_not_raise_on_any_path(monkeypatch) -> None:
     ))
     # L5 — exercise the force-close TRADE_CLOSED + deal-log path.
     from execution.types import ExecutionPosition
-    from regime.labels import Direction, RegimeLabel
+    from common import Direction
+    from day_type import DayType
     from risk.types import ForceCloseOrder
     pos = ExecutionPosition(
         deal_id="DEAL_NA1", deal_reference="REF",
         pair="GBPUSD", direction=Direction.BULLISH,
-        day_type_at_entry=RegimeLabel.TREND, strategy_name="trend_break",
+        day_type_at_entry=DayType.NORMAL, strategy_name="trend_break",
         size_units=1.0, entry_price=1.30050,
         initial_sl_price=1.29900, current_sl_price=1.29900,
         suggested_tp_price=1.30450,
@@ -1279,11 +1198,12 @@ def test_force_close_emits_trade_closed_and_records_in_deal_log(monkeypatch) -> 
     bot.mark_ready()
     # Seed a position that will be force-closed.
     from execution.types import ExecutionPosition
-    from regime.labels import Direction, RegimeLabel
+    from common import Direction
+    from day_type import DayType
     pos = ExecutionPosition(
         deal_id="DEAL_FC1", deal_reference="REF",
         pair="GBPUSD", direction=Direction.BULLISH,
-        day_type_at_entry=RegimeLabel.TREND, strategy_name="trend_break",
+        day_type_at_entry=DayType.NORMAL, strategy_name="trend_break",
         size_units=1.0, entry_price=1.30050,
         initial_sl_price=1.29900, current_sl_price=1.29900,
         suggested_tp_price=1.30450,
@@ -1317,11 +1237,12 @@ def test_force_close_rejected_does_not_emit_trade_closed(monkeypatch) -> None:
     bot.mark_ready()
     pieces["ig"].close_should_fail = True
     from execution.types import ExecutionPosition
-    from regime.labels import Direction, RegimeLabel
+    from common import Direction
+    from day_type import DayType
     pos = ExecutionPosition(
         deal_id="DEAL_FC2", deal_reference="REF",
         pair="GBPUSD", direction=Direction.BULLISH,
-        day_type_at_entry=RegimeLabel.TREND, strategy_name="trend_break",
+        day_type_at_entry=DayType.NORMAL, strategy_name="trend_break",
         size_units=1.0, entry_price=1.30050,
         initial_sl_price=1.29900, current_sl_price=1.29900,
         suggested_tp_price=1.30450,

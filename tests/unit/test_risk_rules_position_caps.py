@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 
 from risk.rules.position_caps import check_position_caps
 from risk.types import CandidateTrade, OpenPosition

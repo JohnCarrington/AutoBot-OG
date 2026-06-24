@@ -39,7 +39,7 @@ import pandas as pd
 
 from config.pair_config import MIN_SL_PIPS, pip_size_for, price_to_pips
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 from structure_engine import StructureLevel, StructureState
 
 from .constants import (

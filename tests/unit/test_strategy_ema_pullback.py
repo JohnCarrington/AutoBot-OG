@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 from strategies.ema_pullback import detect_ema_pullback
 from structure_engine import StructureLevel, StructureState
 

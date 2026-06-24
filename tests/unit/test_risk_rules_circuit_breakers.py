@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 
 from risk.constants import (
     CONSECUTIVE_LOSS_COOLDOWN_HOURS,

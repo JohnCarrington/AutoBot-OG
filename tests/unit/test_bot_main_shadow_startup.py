@@ -292,7 +292,7 @@ def test_build_runtime_threads_shadow_mode_to_bot_loop(monkeypatch) -> None:
             self._shadow_mode = kw["shadow_mode"]
 
     # Stub every collaborator _build_runtime calls so we don't touch
-    # real IG / FeedManager / RegimeEngine / etc.
+    # real IG / FeedManager / etc.
     class _FakeSession:
         acc_type = "DEMO"
         account_id = "ACC1"
@@ -308,7 +308,6 @@ def test_build_runtime_threads_shadow_mode_to_bot_loop(monkeypatch) -> None:
         main_mod.PositionManager, "load_from_path",
         classmethod(lambda cls: object()),
     )
-    monkeypatch.setattr(main_mod, "RegimeEngine", lambda: object())
     monkeypatch.setattr(main_mod, "RiskGuard", lambda **kw: object())
     monkeypatch.setattr(main_mod, "Executor", lambda **kw: object())
 
@@ -356,7 +355,6 @@ def test_build_runtime_default_shadow_mode_is_false(monkeypatch) -> None:
         main_mod.PositionManager, "load_from_path",
         classmethod(lambda cls: object()),
     )
-    monkeypatch.setattr(main_mod, "RegimeEngine", lambda: object())
     monkeypatch.setattr(main_mod, "RiskGuard", lambda **kw: object())
     monkeypatch.setattr(main_mod, "Executor", lambda **kw: object())
     from feed.feed_manager import FeedManager

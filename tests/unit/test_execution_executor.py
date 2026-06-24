@@ -25,7 +25,7 @@ from feed.ig_rest.types import (
     OrderRequest,
 )
 from day_type import DayType
-from regime.labels import Direction, RegimeLabel
+from common import Direction
 from strategies.signal import Signal
 
 

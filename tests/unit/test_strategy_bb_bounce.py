@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 from strategies.bb_bounce import detect_bb_bounce
 from structure_engine import StructureLevel, StructureState
 

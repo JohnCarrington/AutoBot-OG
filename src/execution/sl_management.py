@@ -22,7 +22,7 @@ from typing import Any, Optional
 import pandas as pd
 
 from config.pair_config import MIN_SL_PIPS, pip_size_for, pip_to_price, price_to_pips
-from regime.labels import Direction
+from common import Direction
 from structure import get_structure_state
 
 from .constants import (

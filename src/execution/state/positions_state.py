@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 
 from ..constants import EXECUTION_STATE_PATH
 from ..types import ExecutionPosition, SLAmendment

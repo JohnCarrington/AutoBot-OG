@@ -80,7 +80,6 @@ from indicators.bollinger import add_bollinger
 from indicators.ema import add_ema
 from indicators.macd import add_macd
 from indicators.normalised import add_bb_width_normalised, add_ema_slope_normalised
-from regime.engine import RegimeEngine
 from risk.guard import RiskGuard
 from risk.types import (
     AccountState,
@@ -148,13 +147,12 @@ class _PerPairBotState:
     (which is the M5 data). This holds whatever the orchestrator
     needs to thread between events.
 
-    Right now: just the regime engine. Per-pair regime is the v1
-    design — each pair has its own engine instance because regime
-    detection runs on a single pair's indicator timeline.
+    2d: regime engine removed. The dispatcher now keys on day_type
+    and the EOD rule keys on structure htf_bias — nothing in the bot
+    loop needs a regime engine anymore.
     """
 
     pair: str
-    regime_engine: RegimeEngine
     last_h1_open_processed: Optional[datetime] = None
     # 2c (B-1): cache the latest structure snapshot so the EOD rule can
     # consult htf_bias per pair without re-running analyze_structure.
@@ -201,7 +199,6 @@ class BotLoop:
         account_balance: float = _DEFAULT_BALANCE,
         account_currency: str = _DEFAULT_CURRENCY,
         clock: Optional[Callable[[], datetime]] = None,
-        regime_engines: Optional[dict[str, RegimeEngine]] = None,
         alerter: Optional[TelegramAlerter] = None,
         shadow_mode: bool = False,
     ) -> None:
@@ -237,27 +234,12 @@ class BotLoop:
         self._recent_closes: dict[str, dict] = {}
 
         self._state: BotState = BotState.STARTING
-        # One regime engine per pair (v1: per-pair regime). Callers
-        # (bot.main._build_runtime, tests) MAY supply the engine map
-        # so the same instances can also be handed to RiskGuard via
-        # an ``engine_for_pair`` callable — that's the C2 fix. When
-        # omitted, BotLoop constructs its own; the caller is then
-        # responsible for not also wiring a *different* engine into
-        # RiskGuard (which is exactly how the C2 bug shipped).
-        if regime_engines is not None:
-            missing = set(self._pairs) - set(regime_engines.keys())
-            if missing:
-                raise ValueError(
-                    f"regime_engines is missing entries for pairs: "
-                    f"{sorted(missing)}"
-                )
-            engine_map = dict(regime_engines)
-        else:
-            engine_map = {p: RegimeEngine() for p in self._pairs}
-        self._regime_engines: dict[str, RegimeEngine] = engine_map
+        # 2d: per-pair regime engines deleted. The dispatcher reads
+        # day_type from the news calendar and the EOD rule keys on
+        # structure htf_bias; nothing in this loop needs a regime
+        # engine anymore.
         self._pair_state: dict[str, _PerPairBotState] = {
-            p: _PerPairBotState(pair=p, regime_engine=engine_map[p])
-            for p in self._pairs
+            p: _PerPairBotState(pair=p) for p in self._pairs
         }
         self._last_reconciliation_at: datetime = self._clock()
 
@@ -532,28 +514,6 @@ class BotLoop:
     def state(self) -> BotState:
         return self._state
 
-    def regime_engine_for(self, pair: str) -> RegimeEngine:
-        """Return the per-pair regime engine — for sharing with RiskGuard.
-
-        bot.main wires ``RiskGuard(engine_for_pair=bot.regime_engine_for)``
-        so the risk layer reads the same engine the BotLoop feeds. C2
-        (adversarial review 2026-05-15): wiring a separate engine into
-        RiskGuard silently disabled the regime-instability circuit
-        breaker because nothing ever called ``process_*_close`` on the
-        standalone instance.
-        """
-        return self._regime_engines[pair]
-
-    @property
-    def regime_engines(self) -> dict[str, RegimeEngine]:
-        """Read-only view of the per-pair regime engine map.
-
-        Returns a shallow copy — callers must not mutate the dict.
-        Intended for ops introspection and the ``bot.main`` wiring
-        step (handed to ``RiskGuard(engine_for_pair=...)``).
-        """
-        return dict(self._regime_engines)
-
     # ------------------------------------------------------------------
     # Event handler
     # ------------------------------------------------------------------
@@ -698,20 +658,21 @@ class BotLoop:
             df_m5_enriched, m5_close_time=candle.close_time,
         )
 
-        self._update_regime(pair, df_m5_enriched, df_h1_enriched, candle)
-
-        # Phase 11: Structure Engine analysis. Always-on per the same
-        # rationale as the regime update — gap-fill bars feed it so the
+        # Phase 11: Structure Engine analysis. Always-on per the prior
+        # regime-update rationale — gap-fill bars feed it so the
         # historical view stays consistent. The signal gate below still
         # suppresses *trades*; this runs purely for state + jsonl
         # observability. session_state is a Phase 11 stub (None); a
-        # follow-up phase will wire a SessionTracker.
+        # follow-up phase will wire a SessionTracker. 2d: regime_state
+        # is an empty dict — the regime spine was deleted and the
+        # structure engine only stored regime values in its debug
+        # payload (no decision logic).
         structure_state = analyze_structure(
             pair=pair,
             candles_m5=df_m5_enriched,
             candles_m15=df_m15_enriched,
             candles_h1=df_h1_enriched,
-            regime_state=self._pair_state[pair].regime_engine.get_state(),
+            regime_state={},
             session_state=None,
         )
         log_structure_state(structure_state)
@@ -1010,42 +971,6 @@ class BotLoop:
         return self._derive_and_enrich_m15(df_m5, m5_close_time=m5_close_time)
 
     # ------------------------------------------------------------------
-    # Regime
-    # ------------------------------------------------------------------
-
-    def _update_regime(
-        self,
-        pair: str,
-        df_m5: pd.DataFrame,
-        df_h1: pd.DataFrame,
-        m5_candle: Candle,
-    ) -> None:
-        state = self._pair_state[pair]
-        engine = state.regime_engine
-
-        # H1 close — only when the M5 bar we just received was the
-        # last M5 of an H1 (minute == 0 on close_time means we just
-        # completed minute 55→00).
-        if m5_candle.close_time.minute == 0 and not df_h1.empty:
-            new_h1_open = df_h1.index[-1]
-            if state.last_h1_open_processed != new_h1_open:
-                prev_h1 = df_h1.iloc[-2] if len(df_h1) >= 2 else None
-                engine.process_h1_close(df_h1.iloc[-1], prev_h1)
-                state.last_h1_open_processed = new_h1_open
-
-        # Always feed the M5 close.
-        if not df_m5.empty:
-            engine.process_m5_close(df_m5.iloc[-1])
-
-        state = engine.get_state()
-        logger.info(
-            "regime[%s] current=%s direction=%s is_live=%s reason=%s",
-            pair, state.get("current_regime"),
-            state.get("current_direction"), engine.is_live(),
-            state.get("reason"),
-        )
-
-    # ------------------------------------------------------------------
     # Periodic tasks (inline scheduler)
     # ------------------------------------------------------------------
 
@@ -1174,7 +1099,7 @@ class BotLoop:
 
     def _execute_force_close(self, order: ForceCloseOrder) -> None:
         from feed.ig_rest.types import CloseRequest  # local import keeps top tight
-        from regime.labels import Direction
+        from common import Direction
 
         position = self._positions.get(order.position_id)
         if position is None:
@@ -1603,7 +1528,7 @@ class BotLoop:
         Always logs at INFO regardless of alerter wiring so a
         no-alerter shadow run still leaves a journalctl breadcrumb.
         """
-        from regime.labels import Direction
+        from common import Direction
         side = "BUY" if signal.direction == Direction.BULLISH else "SELL"
         full_text = (
             f"\U0001f47b [SHADOW] {signal.pair} {side} @ "

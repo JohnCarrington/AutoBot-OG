@@ -100,9 +100,7 @@ def _build_bot_with_alerter(
     executor = _FakeExecutor()
     pm = _FakePositionManager()
 
-    from regime.engine import RegimeEngine
-    engines = {p: RegimeEngine() for p in pairs}
-    rg = _FakeRiskGuard(engine_for_pair=lambda pair: engines[pair])
+    rg = _FakeRiskGuard()
 
     import bot.loop as loop_mod
     monkeypatch.setattr(
@@ -121,7 +119,6 @@ def _build_bot_with_alerter(
         position_manager=pm,         # type: ignore[arg-type]
         pairs=tuple(pairs),
         pair_to_epic={p: f"CS.D.{p}.TODAY.IP" for p in pairs},
-        regime_engines=engines,
         clock=clock or (lambda: _NOW),
         alerter=alerter,             # type: ignore[arg-type]
     )

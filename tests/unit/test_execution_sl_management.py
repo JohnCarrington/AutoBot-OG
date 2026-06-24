@@ -8,7 +8,8 @@ import pytest
 
 from execution.sl_management import evaluate_sl_amend
 from execution.types import ExecutionPosition
-from regime.labels import Direction, RegimeLabel
+from common import Direction
+from day_type import DayType
 
 
 _TS = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)
@@ -21,7 +22,7 @@ def _pos(**overrides) -> ExecutionPosition:
         deal_reference="REF",
         pair="GBPUSD",
         direction=Direction.BULLISH,
-        day_type_at_entry=RegimeLabel.TREND,
+        day_type_at_entry=DayType.NORMAL,
         strategy_name="ema_pullback",
         size_units=1.0,
         entry_price=1.30000,

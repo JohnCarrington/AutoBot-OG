@@ -8,7 +8,7 @@ import pytest
 
 from config.pair_config import pip_size_for, pip_to_price, price_to_pips
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 from strategies.signal import Signal, compute_invalid_after
 
 

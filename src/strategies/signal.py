@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal, Mapping, Optional
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 
 from .constants import M5_BAR_MINUTES
 

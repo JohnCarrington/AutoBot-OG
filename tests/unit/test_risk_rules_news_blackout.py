@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import pytest
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 
 from risk.news_calendar.calendar import BlackoutResult
 from risk.rules import news_blackout

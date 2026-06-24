@@ -16,7 +16,7 @@ from datetime import datetime
 from typing import Optional
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 
 
 # ---------------------------------------------------------------------------

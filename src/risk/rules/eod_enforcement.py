@@ -10,11 +10,13 @@ Two distinct responsibilities, both DST-aware via :mod:`zoneinfo`:
   predict whether structure will agree at EOD.
 - :py:func:`apply_eod_force_close` — at NY close, return
   :py:class:`ForceCloseOrder` records for every position that should
-  be flat overnight. 2c (B-1): the carve-out for overnight hold now
+  be flat overnight. 2c/2d (B-1): the carve-out for overnight hold
   keys on the structure engine's ``htf_bias`` matching the position's
   direction (HTF thesis intact). Any position whose htf_bias has
   flipped — or for which structure isn't available — force-closes.
-  The +1R floor still applies, and Fridays close everything.
+  Fridays close everything. 2d strips the +1R floor that was added in
+  2c but not part of the locked B-1 design — pnl level no longer
+  affects the hold decision; only htf_bias alignment + weekday do.
 """
 from __future__ import annotations
 
@@ -22,12 +24,11 @@ from datetime import datetime, time, timedelta
 from typing import Mapping, Optional
 from zoneinfo import ZoneInfo
 
-from regime.labels import Direction
+from common import Direction
 
 from ..constants import (
     NY_CLOSE_HOUR_LOCAL,
     NY_TZ_NAME,
-    OVERNIGHT_HOLD_MIN_R,
     PRE_EOD_NO_ENTRY_MIN,
 )
 from ..types import (
@@ -104,16 +105,17 @@ def apply_eod_force_close(
     idempotent on a given second — it just describes what *should* be
     closed; placing the order is the caller's job.
 
-    A position survives overnight (no order returned) iff ALL of:
+    A position survives overnight (no order returned) iff BOTH of:
 
     - Today is Mon, Tue, Wed, or Thu (in NY local time).
-    - ``current_pnl_r >= OVERNIGHT_HOLD_MIN_R`` (default +1R).
     - Structure ``htf_bias`` for the position's pair still matches the
       position's direction (BULLISH-position needs ``htf_bias="BULLISH"``;
       BEARISH needs ``htf_bias="BEARISH"``).
 
     Everything else force-closes at NY close. Friday closes everything
-    unconditionally.
+    unconditionally. 2d note: the +1R PnL gate was removed — the
+    hold decision is purely structural now, in line with the B-1
+    design ("HTF thesis intact ⇒ hold").
 
     Parameters
     ----------
@@ -144,37 +146,6 @@ def apply_eod_force_close(
                     position_id=pos.position_id,
                     pair=pos.pair,
                     reason="eod_close: friday_close",
-                )
-            )
-            continue
-
-        # +1R floor — a position that hasn't earned its keep closes.
-        if pos.current_pnl_r < OVERNIGHT_HOLD_MIN_R:
-            # H4 reason note (carried over from the prior breaker): when
-            # the entry was inside the pre-EOD buffer, the trade had no
-            # realistic path to reach +1R before close — surface that in
-            # the reason so post-mortems can identify the wasted-entry
-            # scenario.
-            held_seconds = (now_utc - pos.entry_time_utc).total_seconds()
-            held_min = held_seconds / 60.0
-            inside_buffer = 0 <= held_min < PRE_EOD_NO_ENTRY_MIN
-            buffer_note = (
-                f" (entry was {held_min:.1f}min before close, "
-                f"inside {PRE_EOD_NO_ENTRY_MIN}min buffer — "
-                f"no path to {OVERNIGHT_HOLD_MIN_R}R)"
-                if inside_buffer
-                else ""
-            )
-            orders.append(
-                ForceCloseOrder(
-                    position_id=pos.position_id,
-                    pair=pos.pair,
-                    reason=(
-                        f"eod_close: below_overnight_R "
-                        f"(pnl_r={pos.current_pnl_r:.2f} "
-                        f"< {OVERNIGHT_HOLD_MIN_R})"
-                        f"{buffer_note}"
-                    ),
                 )
             )
             continue

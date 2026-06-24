@@ -17,7 +17,7 @@ from enum import Enum
 from typing import Literal, Optional
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 from risk.types import OpenPosition as RiskOpenPosition
 from strategies.signal import StrategyName
 

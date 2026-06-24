@@ -24,7 +24,7 @@ import pytest
 from bot.loop import BotLoop
 from bot.types import BotState
 from day_type import DayType
-from regime.labels import Direction, RegimeLabel
+from common import Direction
 from strategies.signal import Signal
 
 
@@ -66,7 +66,7 @@ def _build_with_shadow(monkeypatch, *, shadow_mode: bool, alerter=None):
     Reuses _build() from test_bot_loop to get the underlying fakes,
     then re-constructs the bot with the shadow flag set."""
     bot, pieces = _build(monkeypatch)
-    engines = pieces["engines"]
+    pairs = ("GBPUSD",)
     if alerter is None:
         alerter = _RecordingAlerter()
     bot = BotLoop(
@@ -75,9 +75,8 @@ def _build_with_shadow(monkeypatch, *, shadow_mode: bool, alerter=None):
         executor=pieces["executor"],
         risk_guard=pieces["risk"],
         position_manager=pieces["positions"],
-        pairs=tuple(engines.keys()),
-        pair_to_epic={p: f"CS.D.{p}.TODAY.IP" for p in engines.keys()},
-        regime_engines=engines,
+        pairs=tuple(pairs),
+        pair_to_epic={p: f"CS.D.{p}.TODAY.IP" for p in pairs},
         clock=lambda: _NOW,
         alerter=alerter,  # type: ignore[arg-type]
         shadow_mode=shadow_mode,
@@ -253,13 +252,13 @@ def _seed_position(pieces) -> str:
     deal_id. Used by the layer-2 defense tests where the bot is
     constructed directly (bypassing layer 1 in bot.main)."""
     from execution.types import ExecutionPosition
-    from regime.labels import Direction, RegimeLabel
+    from common import Direction
     pos = ExecutionPosition(
         deal_id="DEAL_GUARD",
         deal_reference="REF",
         pair="GBPUSD",
         direction=Direction.BULLISH,
-        day_type_at_entry=RegimeLabel.TREND,
+        day_type_at_entry=DayType.NORMAL,
         strategy_name="trend_break",
         size_units=1.0,
         entry_price=1.30050,

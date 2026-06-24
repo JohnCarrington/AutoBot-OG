@@ -73,12 +73,9 @@ NY_TZ_NAME: str = os.getenv("RISK_NY_TZ", "America/New_York")
 PRE_EOD_NO_ENTRY_MIN: int = _env_int("RISK_PRE_EOD_NO_ENTRY_MIN", 30)
 
 # --- Overnight hold (§6.5) --------------------------------------------------
-# Minimum unrealised PnL (in R-multiples) for a position to be eligible for
-# overnight hold. 2c (B-1) keeps the +1R floor but the hold decision now
-# keys on structure htf_bias alignment, not the position's regime label.
-OVERNIGHT_HOLD_MIN_R: float = _env_float(
-    "RISK_OVERNIGHT_HOLD_MIN_R", 1.0
-)
+# 2d: the +1R floor (OVERNIGHT_HOLD_MIN_R) was removed. The overnight-hold
+# decision is purely structural now (weekday + htf_bias alignment); pnl
+# level no longer affects it.
 
 __all__ = [
     "CONSECUTIVE_LOSS_COOLDOWN_HOURS",
@@ -89,7 +86,6 @@ __all__ = [
     "MAX_PER_STRATEGY",
     "NY_CLOSE_HOUR_LOCAL",
     "NY_TZ_NAME",
-    "OVERNIGHT_HOLD_MIN_R",
     "PRE_EOD_NO_ENTRY_MIN",
     "SPREAD_ABS_CAP_PIPS",
     "SPREAD_ATR_MULT",

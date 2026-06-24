@@ -18,10 +18,11 @@ Three public methods:
 
 State is persisted lazily — only when a rule marks state dirty.
 
-2c (B-2/B-3): the regime-instability breaker is gone, so the guard
-no longer needs a ``RegimeEngine`` reference. The overnight-hold
-carve-out is driven by structure ``htf_bias``, plumbed at call-time
-into :py:meth:`positions_to_force_close`.
+2c/2d: the regime-instability breaker is gone and the regime spine
+itself was deleted, so the guard no longer touches anything regime-
+shaped. The overnight-hold carve-out is driven by structure
+``htf_bias``, plumbed at call-time into
+:py:meth:`positions_to_force_close`.
 """
 from __future__ import annotations
 

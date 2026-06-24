@@ -14,7 +14,8 @@ from execution.types import (
     SLAmendment,
 )
 from feed.ig_rest.types import BrokerPosition
-from regime.labels import Direction, RegimeLabel
+from common import Direction
+from day_type import DayType
 
 
 _NOW = datetime(2026, 5, 14, 17, 0, tzinfo=timezone.utc)
@@ -33,7 +34,7 @@ def _pos(
         deal_reference=f"REF_{deal_id}",
         pair=pair,
         direction=Direction.BULLISH,
-        day_type_at_entry=RegimeLabel.TREND,
+        day_type_at_entry=DayType.NORMAL,
         strategy_name="ema_pullback",
         size_units=1.0,
         entry_price=1.30000,

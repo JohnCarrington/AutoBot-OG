@@ -1,16 +1,17 @@
-"""Tests for risk.rules.eod_enforcement (2c B-1 rewrite).
+"""Tests for risk.rules.eod_enforcement (2c B-1 / 2d strip).
 
-The overnight-hold carve-out is now structure-driven (htf_bias must
-match the position's direction) rather than regime-driven. The
-pre-EOD suppression rule no longer has a TREND carve-out — every
-candidate inside the buffer is rejected.
+The overnight-hold carve-out is structure-driven: htf_bias must match
+the position's direction (Mon-Thu only). 2d strip: the +1R PnL floor
+that 2c added is gone — pnl level no longer affects the hold decision,
+only htf_bias alignment + weekday do. The pre-EOD suppression rule has
+no TREND carve-out; every candidate inside the buffer is rejected.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 
 from risk.rules.eod_enforcement import (
     apply_eod_force_close,
@@ -192,16 +193,29 @@ def test_position_closed_when_htf_bias_explicit_none() -> None:
     assert "structure_unavailable" in orders[0].reason
 
 
-def test_position_closed_when_below_overnight_R() -> None:
-    """+0.5R is below the +1R floor → close even if htf_bias agrees."""
+def test_position_holds_below_R_when_htf_bias_aligned() -> None:
+    """2d: pnl_r no longer affects the hold decision. A BULLISH
+    position with htf_bias BULLISH at +0.5R survives Mon-Thu."""
     now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
     orders = apply_eod_force_close(
         positions=[_pos(pnl_r=0.5, direction=Direction.BULLISH)],
         now_utc=now,
         htf_bias_for_pair={"GBPUSD": "BULLISH"},
     )
-    assert len(orders) == 1
-    assert "below_overnight_R" in orders[0].reason
+    assert orders == []
+
+
+def test_position_holds_at_negative_pnl_when_htf_bias_aligned() -> None:
+    """2d: even an underwater position holds overnight if htf_bias
+    still agrees. The decision is purely structural — daily-DD is the
+    rule that caps the bleed, not the EOD gate."""
+    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
+    orders = apply_eod_force_close(
+        positions=[_pos(pnl_r=-0.3, direction=Direction.BULLISH)],
+        now_utc=now,
+        htf_bias_for_pair={"GBPUSD": "BULLISH"},
+    )
+    assert orders == []
 
 
 def test_bearish_position_survives_when_htf_bias_is_bearish() -> None:
@@ -227,78 +241,44 @@ def test_friday_closes_everything_even_when_htf_bias_aligned() -> None:
     assert "friday_close" in orders[0].reason
 
 
-def test_force_close_emits_one_order_per_position() -> None:
-    """Two losing positions; both should get an order."""
+def test_force_close_emits_one_order_per_misaligned_position() -> None:
+    """Two positions, both with htf_bias misaligned → both close."""
     now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
-    p1 = _pos(pid="p1", pnl_r=0.5)
-    p2 = _pos(pid="p2", pnl_r=0.5)
+    p1 = _pos(pid="p1", pnl_r=0.5, direction=Direction.BULLISH)
+    p2 = _pos(pid="p2", pnl_r=0.5, direction=Direction.BULLISH)
     orders = apply_eod_force_close(
         positions=[p1, p2],
         now_utc=now,
-        htf_bias_for_pair={"GBPUSD": "BULLISH"},
+        htf_bias_for_pair={"GBPUSD": "BEARISH"},
     )
     pids = sorted(o.position_id for o in orders)
     assert pids == ["p1", "p2"]
 
 
-def test_force_close_dst_winter() -> None:
+def test_force_close_dst_winter_holds_when_htf_aligned() -> None:
+    """2d: at 17:00 EST (winter close) a htf-aligned position holds
+    regardless of pnl level."""
     # 2025-01-15 Wed at 22:00 UTC = 17:00 EST → at close.
     now = datetime(2025, 1, 15, 22, 0, tzinfo=timezone.utc)
     orders = apply_eod_force_close(
-        positions=[_pos(pnl_r=0.5)],
+        positions=[_pos(pnl_r=0.5, direction=Direction.BULLISH)],
         now_utc=now,
         htf_bias_for_pair={"GBPUSD": "BULLISH"},
     )
-    assert len(orders) == 1
-
-
-# --- H4 reason note: entry inside buffer ----------------------------------
-
-
-def test_below_R_inside_buffer_flags_wasted_entry_in_reason() -> None:
-    """H4: an entry made inside the pre-EOD buffer that hasn't
-    reached +1R surfaces the inside-buffer note in the reason."""
-    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
-    entry = datetime(2025, 5, 14, 20, 45, tzinfo=timezone.utc)
-    orders = apply_eod_force_close(
-        positions=[_pos(pnl_r=0.3, entry_time_utc=entry)],
-        now_utc=now,
-        htf_bias_for_pair={"GBPUSD": "BULLISH"},
-    )
-    assert len(orders) == 1
-    reason = orders[0].reason
-    assert "below_overnight_R" in reason
-    assert "inside" in reason
-    assert "buffer" in reason
-    assert "no path" in reason
-
-
-def test_below_R_outside_buffer_omits_wasted_entry_note() -> None:
-    """H4 negative: an entry made hours before close gets no buffer note."""
-    now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
-    entry = datetime(2025, 5, 14, 12, 0, tzinfo=timezone.utc)
-    orders = apply_eod_force_close(
-        positions=[_pos(pnl_r=0.5, entry_time_utc=entry)],
-        now_utc=now,
-        htf_bias_for_pair={"GBPUSD": "BULLISH"},
-    )
-    assert len(orders) == 1
-    reason = orders[0].reason
-    assert "below_overnight_R" in reason
-    assert "inside" not in reason
-    assert "no path" not in reason
+    assert orders == []
 
 
 def test_mixed_position_basket() -> None:
-    """A realistic basket: one held (htf-aligned + profitable), one closed
-    (htf flipped), one closed (below R), one closed (structure missing
-    on its pair)."""
+    """A realistic 2d basket: htf-aligned positions HOLD (pnl level
+    irrelevant); only flipped-bias and missing-structure positions
+    close."""
     now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
     positions = [
-        _pos(pid="held", pair="GBPUSD", pnl_r=2.0, direction=Direction.BULLISH),
-        _pos(pid="flipped", pair="EURUSD", pnl_r=2.0,
+        _pos(pid="held_high", pair="GBPUSD", pnl_r=2.0,
              direction=Direction.BULLISH),
-        _pos(pid="low_r", pair="GBPUSD", pnl_r=0.5,
+        _pos(pid="held_low", pair="EURUSD", pnl_r=0.2,
+             direction=Direction.BULLISH),
+        _pos(pid="flipped", pair="USDCAD", pnl_r=2.0,
              direction=Direction.BULLISH),
         _pos(pid="no_struct", pair="USDJPY", pnl_r=2.0,
              direction=Direction.BULLISH),
@@ -308,9 +288,10 @@ def test_mixed_position_basket() -> None:
         now_utc=now,
         htf_bias_for_pair={
             "GBPUSD": "BULLISH",
-            "EURUSD": "BEARISH",
+            "EURUSD": "BULLISH",
+            "USDCAD": "BEARISH",
             # USDJPY missing → fail-closed.
         },
     )
     closed_ids = sorted(o.position_id for o in orders)
-    assert closed_ids == ["flipped", "low_r", "no_struct"]
+    assert closed_ids == ["flipped", "no_struct"]

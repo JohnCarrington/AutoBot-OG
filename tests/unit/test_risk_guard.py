@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 
 from risk.constants import (
     CONSECUTIVE_LOSS_THRESHOLD,
@@ -337,21 +337,27 @@ def test_record_trade_outcome_arms_consecutive_loss_cooldown(
 
 
 def test_force_close_consults_structure_state_for_pair(tmp_path: Path) -> None:
-    """B-1/B-3: the callable provides htf_bias per pair. A
-    profitable BULLISH position whose htf_bias is still BULLISH
-    survives the Wed NY close."""
+    """B-1/B-3/2d: the callable provides htf_bias per pair. A BULLISH
+    position whose htf_bias is still BULLISH survives the Wed NY close
+    regardless of pnl level; a BULLISH position whose htf_bias has
+    gone BEARISH closes."""
     guard = RiskGuard(state_path=tmp_path / "cb.json")
     now = datetime(2025, 5, 14, 21, 0, tzinfo=timezone.utc)
+    bias_map = {"GBPUSD": "BULLISH", "EURUSD": "BEARISH"}
     orders = guard.positions_to_force_close(
         positions=[
-            _pos(pid="held", pnl_r=2.0, direction=Direction.BULLISH),
-            _pos(pid="below_R", pnl_r=0.5, direction=Direction.BULLISH),
+            _pos(pid="held_high", pair="GBPUSD", pnl_r=2.0,
+                 direction=Direction.BULLISH),
+            _pos(pid="held_low", pair="GBPUSD", pnl_r=0.2,
+                 direction=Direction.BULLISH),
+            _pos(pid="flipped", pair="EURUSD", pnl_r=2.0,
+                 direction=Direction.BULLISH),
         ],
         now_utc=now,
-        structure_state_for_pair=lambda _p: _structure(htf_bias="BULLISH"),
+        structure_state_for_pair=lambda p: _structure(htf_bias=bias_map[p]),
     )
     pids = sorted(o.position_id for o in orders)
-    assert pids == ["below_R"]
+    assert pids == ["flipped"]
 
 
 def test_force_close_when_structure_lookup_returns_none(

@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 from strategies import dispatcher
 from strategies.signal import Signal, compute_invalid_after
 from structure_engine import StructureState

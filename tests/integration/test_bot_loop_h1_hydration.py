@@ -26,7 +26,6 @@ import pandas as pd
 from bot.loop import BotLoop, _synthesise_h1_from_m5_tail
 from feed.rolling_buffer import RollingBuffer
 from feed.types import Candle
-from regime.engine import RegimeEngine
 
 # Reuse the fake fixtures from the main BotLoop suite — same pattern
 # as test_bot_loop_structure_alerts.py.
@@ -170,8 +169,7 @@ def _build_bot(
     ig = _FakeIGClient()
     executor = _FakeExecutor()
     pm = _FakePositionManager()
-    engines = {p: RegimeEngine() for p in pairs}
-    rg = _FakeRiskGuard(engine_for_pair=lambda pair: engines[pair])
+    rg = _FakeRiskGuard()
 
     import bot.loop as loop_mod
     monkeypatch.setattr(
@@ -189,7 +187,6 @@ def _build_bot(
         position_manager=pm,      # type: ignore[arg-type]
         pairs=tuple(pairs),
         pair_to_epic={p: f"CS.D.{p}.TODAY.IP" for p in pairs},
-        regime_engines=engines,
         clock=lambda: _NOW,
     )
 

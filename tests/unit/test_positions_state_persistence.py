@@ -13,7 +13,7 @@ from execution.state.positions_state import (
 )
 from execution.types import ExecutionPosition, SLAmendment
 from day_type import DayType
-from regime.labels import Direction
+from common import Direction
 
 
 _TS = datetime(2026, 5, 14, 12, 0, tzinfo=timezone.utc)

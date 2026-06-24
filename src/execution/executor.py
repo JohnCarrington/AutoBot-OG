@@ -34,7 +34,7 @@ from feed.ig_rest import (
     IGClient,
     OrderRequest,
 )
-from regime.labels import Direction
+from common import Direction
 from strategies.signal import Signal
 
 from .constants import (

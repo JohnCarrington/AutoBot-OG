@@ -39,7 +39,6 @@ from feed.ig_rest.auth import create_ig_service
 from feed.ig_rest.client import IGClient
 from feed.ig_rest.history import fetch_historical_prices
 from feed.lightstreamer.client import LightstreamerSubscriber
-from regime.engine import RegimeEngine
 from risk.guard import RiskGuard
 
 from . import preflight as preflight_mod
@@ -261,15 +260,9 @@ def _build_runtime(
     # Persistent state.
     position_manager = PositionManager.load_from_path()
 
-    # 2c (B-3): RiskGuard no longer needs a RegimeEngine reference —
-    # the regime-instability breaker was deleted (B-2) and the EOD
-    # carve-out keys on structure htf_bias, plumbed in at call-time by
-    # BotLoop. The per-pair regime engines are still built here and
-    # handed to BotLoop because 2d (not this step) is what deletes the
-    # regime module.
-    regime_engines: dict[str, RegimeEngine] = {
-        p: RegimeEngine() for p in config.pairs
-    }
+    # 2d: regime engines deleted. Nothing in the bot needs them
+    # anymore — the dispatcher keys on day_type and the EOD rule keys
+    # on structure htf_bias.
     risk_guard = RiskGuard()
 
     # Executor.
@@ -331,7 +324,6 @@ def _build_runtime(
         position_manager=position_manager,
         pairs=config.pairs,
         pair_to_epic=config.pair_to_epic,
-        regime_engines=regime_engines,  # shared with RiskGuard (C2)
         clock=lambda: datetime.now(timezone.utc),
         alerter=alerter,
         shadow_mode=shadow_mode,
