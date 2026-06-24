@@ -189,12 +189,14 @@ def test_big_news_routes_to_news_structure_break_and_ema_pullback(
 # --- Stub detectors return None --------------------------------------------
 
 
-def test_step3_step5_stubs_return_none_in_dispatcher(empty_frames) -> None:
-    """detect_news and detect_structure_break stubs always return None.
-
-    With unpatched stubs, BIG_NEWS_DAY effectively becomes
-    "ema_pullback only" — and ema_pullback's gates won't pass on the
-    empty stub structure either, so the result is an empty list.
+def test_unpatched_dispatch_with_neutral_structure_yields_empty(
+    empty_frames,
+) -> None:
+    """With the real DISPATCH table and a neutral / UNKNOWN structure
+    state, no detector's gates pass — detect_news is still a stub
+    (step 5), structure_break + ema_pullback both gate on
+    TREND_CONTINUATION + a directional htf_bias, neither of which the
+    stub state provides — so the result is the empty list.
     """
     out = dispatcher.detect_all_setups(
         df_m5=empty_frames[0],
@@ -205,6 +207,52 @@ def test_step3_step5_stubs_return_none_in_dispatcher(empty_frames) -> None:
         current_time=_NOW,
     )
     assert out == []
+
+
+# --- Real-table identity (flagged in step 2b) -----------------------------
+
+
+def test_real_dispatch_table_maps_to_real_detectors() -> None:
+    """The REAL ``dispatcher.DISPATCH`` (not a monkeypatched one) routes
+    each DayType to the real detector functions.
+
+    Catches a fat-fingered table edit — every other dispatcher test
+    rebuilds the table via ``_patch_table`` and so cannot notice the
+    actual module-level tuple regressing. After step 2d / step 3:
+
+    - NORMAL → (detect_bb_bounce,)
+    - PRE_BIG_NEWS → (detect_structure_break, detect_ema_pullback)
+    - BIG_NEWS_DAY → (detect_news, detect_structure_break,
+                       detect_ema_pullback)
+
+    ``detect_news`` is currently the local stub inside dispatcher.py;
+    ``detect_structure_break`` is the real strategies.structure_break
+    detector (step 3); ``detect_bb_bounce`` / ``detect_ema_pullback``
+    are the real strategy modules.
+    """
+    from strategies.bb_bounce import detect_bb_bounce as real_bb
+    from strategies.ema_pullback import detect_ema_pullback as real_ema
+    from strategies.structure_break import (
+        detect_structure_break as real_sb,
+    )
+
+    assert dispatcher.DISPATCH[DayType.NORMAL] == (real_bb,)
+    assert dispatcher.DISPATCH[DayType.PRE_BIG_NEWS] == (
+        real_sb,
+        real_ema,
+    )
+    assert dispatcher.DISPATCH[DayType.BIG_NEWS_DAY] == (
+        dispatcher.detect_news,
+        real_sb,
+        real_ema,
+    )
+    # detect_news is still the local-stub object inside dispatcher.py
+    # (step 5 lands the real one). Confirm by checking it doesn't come
+    # from a strategies.news module.
+    assert dispatcher.detect_news.__module__ == "strategies.dispatcher"
+    # detect_structure_break IS the real strategies.structure_break
+    # function (step 3 wired it in).
+    assert real_sb.__module__ == "strategies.structure_break"
 
 
 # --- None propagation ------------------------------------------------------

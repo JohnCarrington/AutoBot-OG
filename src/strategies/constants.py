@@ -46,6 +46,12 @@ def _i(name: str, default: int) -> int:
 BB_RECLAIM_ATR_MULT: float = _f("STRATEGY_BB_RECLAIM_ATR_MULT", 0.8)
 EMA_CONT_ATR_MULT: float = _f("STRATEGY_EMA_CONT_ATR_MULT", 1.2)
 LIQ_SWEEP_ATR_MULT: float = _f("STRATEGY_LIQ_SWEEP_ATR_MULT", 1.0)
+# Structure-break continuation: same SL philosophy as EMA continuation —
+# the SL sits past the broken-and-accepted level by `mult × ATR_M5` pips
+# (floor: per-pair MIN_SL_PIPS). Tighter than EMA_CONT by default because
+# the level was *just* broken — the accepted close is the proof; a clean
+# re-claim of the zone invalidates the thesis quickly.
+STRUCT_BREAK_ATR_MULT: float = _f("STRATEGY_STRUCT_BREAK_ATR_MULT", 1.0)
 
 
 # --- Confidence bands -------------------------------------------------------
@@ -55,6 +61,8 @@ EMA_CONT_CONF_HIGH: float = _f("STRATEGY_EMA_CONT_CONF_HIGH", 0.80)
 EMA_CONT_CONF_LOW: float = _f("STRATEGY_EMA_CONT_CONF_LOW", 0.60)
 LIQ_SWEEP_CONF_HIGH: float = _f("STRATEGY_LIQ_SWEEP_CONF_HIGH", 0.75)
 LIQ_SWEEP_CONF_LOW: float = _f("STRATEGY_LIQ_SWEEP_CONF_LOW", 0.55)
+STRUCT_BREAK_CONF_HIGH: float = _f("STRATEGY_STRUCT_BREAK_CONF_HIGH", 0.80)
+STRUCT_BREAK_CONF_LOW: float = _f("STRATEGY_STRUCT_BREAK_CONF_LOW", 0.60)
 
 
 # --- EMA Continuation pullback tolerance ------------------------------------
@@ -92,5 +100,8 @@ __all__ = [
     "LIQ_SWEEP_CONF_LOW",
     "LIQ_SWEEP_STRONG_ATR_FRACTION",
     "M5_BAR_MINUTES",
+    "STRUCT_BREAK_ATR_MULT",
+    "STRUCT_BREAK_CONF_HIGH",
+    "STRUCT_BREAK_CONF_LOW",
     "SWEEP_SWING_MAX_AGE_BARS",
 ]

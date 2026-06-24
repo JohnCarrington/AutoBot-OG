@@ -11,11 +11,11 @@ Dispatch table
 - ``DayType.PRE_BIG_NEWS`` → detect_structure_break + detect_ema_pullback
 - ``DayType.NORMAL``       → detect_bb_bounce
 
-``detect_news`` (step 3) and ``detect_structure_break`` (step 5) do
-not exist yet; for THIS step they are wired as local stub detectors
-that always return ``None``. The table is complete so future steps
-can drop in the real detectors without touching the dispatcher
-shape.
+``detect_structure_break`` (step 3) is wired through to the real
+:py:func:`strategies.structure_break.detect_structure_break`.
+``detect_news`` remains a local stub until step 5 lands the real
+news strategy — the table is complete so future steps can drop in
+the real detector without touching the dispatcher shape.
 
 Multi-signal returns
 --------------------
@@ -39,12 +39,13 @@ from structure_engine import StructureState
 from .bb_bounce import detect_bb_bounce
 from .ema_pullback import detect_ema_pullback
 from .signal import Signal
+from .structure_break import detect_structure_break
 
 
 logger = logging.getLogger(__name__)
 
 
-# TODO step-3: replace with the real detect_news implementation.
+# TODO step-5: replace with the real detect_news implementation.
 def detect_news(
     df_m5: pd.DataFrame,  # noqa: ARG001 — stub
     df_h1: pd.DataFrame,  # noqa: ARG001 — stub
@@ -53,20 +54,7 @@ def detect_news(
     pair: str,  # noqa: ARG001 — stub
     current_time: datetime,  # noqa: ARG001 — stub
 ) -> Optional[Signal]:
-    """Stub detector — step 3 will land the real news strategy."""
-    return None
-
-
-# TODO step-5: replace with the real detect_structure_break implementation.
-def detect_structure_break(
-    df_m5: pd.DataFrame,  # noqa: ARG001 — stub
-    df_h1: pd.DataFrame,  # noqa: ARG001 — stub
-    day_type: DayType,  # noqa: ARG001 — stub
-    structure_state: StructureState,  # noqa: ARG001 — stub
-    pair: str,  # noqa: ARG001 — stub
-    current_time: datetime,  # noqa: ARG001 — stub
-) -> Optional[Signal]:
-    """Stub detector — step 5 will land the real structure-break strategy."""
+    """Stub detector — step 5 will land the real news strategy."""
     return None
 
 
