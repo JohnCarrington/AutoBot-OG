@@ -89,6 +89,7 @@ from risk.types import (
     OpenPosition,
 )
 from day_type import classify_day_type
+from risk.news_calendar import poll_for_actual
 from risk.rules.news_blackout import _currencies_for as _currencies_for_pair
 from strategies.dispatcher import detect_all_setups
 from strategies.signal import Signal
@@ -700,7 +701,26 @@ class BotLoop:
         if self._state == BotState.RESUMING and not is_gap_fill:
             self._transition(BotState.NORMAL, reason="live_bar_after_resume")
 
-        # 4. Signal-pipeline gate: skip during stale window AND on
+        # 4. Refresh the news-calendar cache before any downstream
+        #    consumer reads it (classify_day_type in step 5; is_blackout
+        #    in the risk layer). poll_for_actual is throttled internally
+        #    to POLL_INTERVAL (default 10s) so calling once per BAR_CLOSE
+        #    is safe — every BAR_CLOSE issues a fetch attempt at M5
+        #    cadence, and the throttle guards against bursty gap-fill
+        #    bars. Failure-isolated: a fetch exception must not crash
+        #    the bar handler — the existing fail-closed behaviour in
+        #    classify_day_type / is_blackout handles a stale cache. When
+        #    FINNHUB_API_KEY is unset, poll_for_actual is a no-op.
+        try:
+            poll_for_actual()
+        except Exception:  # noqa: BLE001 — defensive: never crash a bar on a calendar fetch
+            logger.warning(
+                "poll_for_actual raised — preserving cache; "
+                "fail-closed behaviour will apply if cache is stale",
+                exc_info=True,
+            )
+
+        # 5. Signal-pipeline gate: skip during stale window AND on
         #    gap-fill bars (don't trade on stale data).
         signals_blocked = (
             self._state in (BotState.STALE, BotState.RESUMING, BotState.SHUTTING_DOWN)
@@ -711,11 +731,11 @@ class BotLoop:
                 pair, df_m5_enriched, df_h1_enriched, structure_state,
             )
 
-        # 5. SL evaluation per open position (BAR_CLOSE cadence, design
+        # 6. SL evaluation per open position (BAR_CLOSE cadence, design
         #    decision #1 — not BAR_UPDATE, not separate timer).
         self._run_sl_evaluation(pair, df_m5_enriched, candle)
 
-        # 6. Tick the alerter — flushes any coalesced groups whose
+        # 7. Tick the alerter — flushes any coalesced groups whose
         #    30s window elapsed during this bar's processing.
         self._tick_alerter()
 
