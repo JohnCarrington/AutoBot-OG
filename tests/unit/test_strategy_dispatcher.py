@@ -255,6 +255,165 @@ def test_real_dispatch_table_maps_to_real_detectors() -> None:
     assert real_sb.__module__ == "strategies.structure_break"
 
 
+# --- B-5 split mutual exclusion (step 3b) ---------------------------------
+
+
+def _split_test_m5():
+    """Minimal M5 frame with ATR for the live detectors."""
+    import pandas as pd
+    idx = pd.DatetimeIndex(
+        [_NOW.replace(minute=m) for m in (50, 55, 0)]
+    )
+    return pd.DataFrame(
+        [
+            {"open": 1.30050, "high": 1.30060, "low": 1.30040,
+             "close": 1.30050, "atr_14": 0.0020},
+            {"open": 1.30050, "high": 1.30060, "low": 1.30040,
+             "close": 1.30050, "atr_14": 0.0020},
+            {"open": 1.30050, "high": 1.30060, "low": 1.30040,
+             "close": 1.30050, "atr_14": 0.0020},
+        ],
+        index=idx,
+    )
+
+
+def _split_test_h1(macd_hist: float = -0.10):
+    import pandas as pd
+    return pd.DataFrame([{"macd_hist_12_26_9": macd_hist}])
+
+
+def _split_level(side: str, price: float):
+    from structure_engine import StructureLevel
+    return StructureLevel(
+        pair="GBPUSD",
+        level_type=("SUPPORT" if side == "LOW" else "RESISTANCE"),
+        price=price,
+        zone_low=price - 0.0004,
+        zone_high=price + 0.0004,
+        timeframe="H1",
+        score=7.0,
+        touch_count=2,
+        last_touched_ts=None,
+        source="swing_h1",
+        debug={},
+    )
+
+
+def _split_structure(*, htf_bias: str, reaction: str, acceptance_state: str):
+    return StructureState(
+        pair="GBPUSD",
+        timestamp=_NOW.isoformat(),
+        is_valid=True,
+        htf_bias=htf_bias,  # type: ignore[arg-type]
+        local_bias=htf_bias,  # type: ignore[arg-type]
+        nearest_support=_split_level("LOW", 1.30000),
+        nearest_resistance=_split_level("HIGH", 1.30200),
+        liquidity_above=None,
+        liquidity_below=None,
+        current_reaction=reaction,  # type: ignore[arg-type]
+        acceptance_state=acceptance_state,  # type: ignore[arg-type]
+        structure_mode="TREND_CONTINUATION",
+        confidence=0.7,
+        reason="test",
+        levels=[],
+        debug={},
+    )
+
+
+def test_acceptance_break_fires_structure_break_only() -> None:
+    """3b mutual exclusion: a SUPPORT_ACCEPTANCE_BREAK reaction routes
+    to structure_break alone; ema_pullback returns None on it."""
+    from strategies.ema_pullback import detect_ema_pullback
+    from strategies.structure_break import detect_structure_break
+
+    state = _split_structure(
+        htf_bias="BEARISH",
+        reaction="SUPPORT_ACCEPTANCE_BREAK",
+        acceptance_state="ACCEPTED_BELOW_SUPPORT",
+    )
+    sb_sig = detect_structure_break(
+        _split_test_m5(), _split_test_h1(), DayType.BIG_NEWS_DAY,
+        state, "GBPUSD", _NOW,
+    )
+    ema_sig = detect_ema_pullback(
+        _split_test_m5(), _split_test_h1(), DayType.BIG_NEWS_DAY,
+        state, "GBPUSD", _NOW,
+    )
+    assert sb_sig is not None
+    assert sb_sig.strategy_name == "structure_break"
+    assert ema_sig is None
+
+
+def test_failed_reclaim_fires_ema_pullback_only() -> None:
+    """3b mirror: a FAILED_RECLAIM_BELOW_SUPPORT reaction routes to
+    ema_pullback alone; structure_break returns None on it."""
+    from strategies.ema_pullback import detect_ema_pullback
+    from strategies.structure_break import detect_structure_break
+
+    state = _split_structure(
+        htf_bias="BEARISH",
+        reaction="FAILED_RECLAIM_BELOW_SUPPORT",
+        acceptance_state="REJECTED_BELOW_SUPPORT",
+    )
+    sb_sig = detect_structure_break(
+        _split_test_m5(), _split_test_h1(), DayType.BIG_NEWS_DAY,
+        state, "GBPUSD", _NOW,
+    )
+    ema_sig = detect_ema_pullback(
+        _split_test_m5(), _split_test_h1(), DayType.BIG_NEWS_DAY,
+        state, "GBPUSD", _NOW,
+    )
+    assert ema_sig is not None
+    assert ema_sig.strategy_name == "ema_pullback"
+    assert sb_sig is None
+
+
+def test_bullish_acceptance_break_fires_structure_break_only() -> None:
+    """3b mutual exclusion (BULLISH mirror)."""
+    from strategies.ema_pullback import detect_ema_pullback
+    from strategies.structure_break import detect_structure_break
+
+    state = _split_structure(
+        htf_bias="BULLISH",
+        reaction="RESISTANCE_ACCEPTANCE_BREAK",
+        acceptance_state="ACCEPTED_ABOVE_RESISTANCE",
+    )
+    sb_sig = detect_structure_break(
+        _split_test_m5(), _split_test_h1(macd_hist=0.10),
+        DayType.PRE_BIG_NEWS, state, "GBPUSD", _NOW,
+    )
+    ema_sig = detect_ema_pullback(
+        _split_test_m5(), _split_test_h1(macd_hist=0.10),
+        DayType.PRE_BIG_NEWS, state, "GBPUSD", _NOW,
+    )
+    assert sb_sig is not None
+    assert sb_sig.strategy_name == "structure_break"
+    assert ema_sig is None
+
+
+def test_bullish_failed_reclaim_fires_ema_pullback_only() -> None:
+    """3b mirror (BULLISH FAILED_RECLAIM)."""
+    from strategies.ema_pullback import detect_ema_pullback
+    from strategies.structure_break import detect_structure_break
+
+    state = _split_structure(
+        htf_bias="BULLISH",
+        reaction="FAILED_RECLAIM_ABOVE_RESISTANCE",
+        acceptance_state="REJECTED_ABOVE_RESISTANCE",
+    )
+    sb_sig = detect_structure_break(
+        _split_test_m5(), _split_test_h1(macd_hist=0.10),
+        DayType.PRE_BIG_NEWS, state, "GBPUSD", _NOW,
+    )
+    ema_sig = detect_ema_pullback(
+        _split_test_m5(), _split_test_h1(macd_hist=0.10),
+        DayType.PRE_BIG_NEWS, state, "GBPUSD", _NOW,
+    )
+    assert ema_sig is not None
+    assert ema_sig.strategy_name == "ema_pullback"
+    assert sb_sig is None
+
+
 # --- None propagation ------------------------------------------------------
 
 

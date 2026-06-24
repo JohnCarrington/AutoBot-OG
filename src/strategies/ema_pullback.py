@@ -3,22 +3,27 @@
 The strategy reads :class:`StructureState` and applies the spec §13
 EMA-Pullback gates. The old "wick-touches-EMA50 + reclaim + bullish-
 bodied confirmation" 3-bar pattern is gone; the Structure Engine's
-``current_reaction`` (acceptance break / failed reclaim) plus
-``structure_mode == TREND_CONTINUATION`` carry the same intent.
+``current_reaction`` (failed reclaim) plus ``structure_mode ==
+TREND_CONTINUATION`` carry the same intent.
 
-Gates (spec §13)
-----------------
+3b note (B-5 split closure): the prior reaction set also included the
+two ``*_ACCEPTANCE_BREAK`` reactions, which step-3 ``structure_break``
+also consumed — so a single acceptance-break event emitted two Signals
+through the dispatcher. To make the split clean (one reaction → exactly
+one strategy), ema_pullback now consumes ONLY the FAILED_RECLAIM
+reactions; ``structure_break`` owns ACCEPTANCE_BREAK.
+
+Gates (spec §13, B-5 split)
+---------------------------
 SELL:
     - ``htf_bias == BEARISH``
     - ``structure_mode == TREND_CONTINUATION``
-    - ``current_reaction in (FAILED_RECLAIM_BELOW_SUPPORT,
-      SUPPORT_ACCEPTANCE_BREAK)``
+    - ``current_reaction == FAILED_RECLAIM_BELOW_SUPPORT``
 
 BUY:
     - ``htf_bias == BULLISH``
     - ``structure_mode == TREND_CONTINUATION``
-    - ``current_reaction in (FAILED_RECLAIM_ABOVE_RESISTANCE,
-      RESISTANCE_ACCEPTANCE_BREAK)``
+    - ``current_reaction == FAILED_RECLAIM_ABOVE_RESISTANCE``
 
 The dispatcher routes this detector on ``DayType.BIG_NEWS_DAY`` and
 ``DayType.PRE_BIG_NEWS`` days.
@@ -52,12 +57,10 @@ from .signal import Signal, compute_invalid_after
 
 _STRATEGY_NAME = "ema_pullback"
 
-_BEARISH_REACTIONS = frozenset(
-    {"FAILED_RECLAIM_BELOW_SUPPORT", "SUPPORT_ACCEPTANCE_BREAK"}
-)
-_BULLISH_REACTIONS = frozenset(
-    {"FAILED_RECLAIM_ABOVE_RESISTANCE", "RESISTANCE_ACCEPTANCE_BREAK"}
-)
+# 3b (B-5 split): FAILED_RECLAIM only. ACCEPTANCE_BREAK reactions are
+# owned by ``strategies.structure_break``.
+_BEARISH_REACTION = "FAILED_RECLAIM_BELOW_SUPPORT"
+_BULLISH_REACTION = "FAILED_RECLAIM_ABOVE_RESISTANCE"
 
 
 def detect_ema_pullback(
@@ -137,9 +140,9 @@ def detect_ema_pullback(
 
 def _direction_from(state: StructureState) -> Optional[Direction]:
     reaction = state.current_reaction
-    if state.htf_bias == "BEARISH" and reaction in _BEARISH_REACTIONS:
+    if state.htf_bias == "BEARISH" and reaction == _BEARISH_REACTION:
         return Direction.BEARISH
-    if state.htf_bias == "BULLISH" and reaction in _BULLISH_REACTIONS:
+    if state.htf_bias == "BULLISH" and reaction == _BULLISH_REACTION:
         return Direction.BULLISH
     return None
 

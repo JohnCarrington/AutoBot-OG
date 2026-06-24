@@ -55,7 +55,7 @@ def _level(side: str, price: float, score: float = 7.0) -> StructureLevel:
 def _structure(
     *,
     htf_bias: str = "BEARISH",
-    reaction: str = "SUPPORT_ACCEPTANCE_BREAK",
+    reaction: str = "FAILED_RECLAIM_BELOW_SUPPORT",
     mode: str = "TREND_CONTINUATION",
     nearest_support: StructureLevel | None = None,
     nearest_resistance: StructureLevel | None = None,
@@ -72,7 +72,7 @@ def _structure(
         liquidity_above=None,
         liquidity_below=None,
         current_reaction=reaction,  # type: ignore[arg-type]
-        acceptance_state="ACCEPTED_BELOW_SUPPORT",
+        acceptance_state="REJECTED_BELOW_SUPPORT",
         structure_mode=mode,  # type: ignore[arg-type]
         confidence=0.7,
         reason="test",
@@ -81,7 +81,10 @@ def _structure(
     )
 
 
-def test_bearish_acceptance_break_emits_sell_on_big_news_day() -> None:
+def test_bearish_failed_reclaim_emits_sell_on_big_news_day() -> None:
+    """3b (B-5 split): ema_pullback's bearish trigger is now
+    FAILED_RECLAIM_BELOW_SUPPORT only — the prior SUPPORT_ACCEPTANCE_BREAK
+    trigger moved to structure_break."""
     sig = detect_ema_pullback(
         df_m5=_m5(),
         df_h1=_h1(macd_hist=-0.10),
@@ -114,6 +117,40 @@ def test_bullish_failed_reclaim_emits_buy_on_pre_big_news() -> None:
     assert sig.day_type is DayType.PRE_BIG_NEWS
 
 
+def test_bearish_acceptance_break_returns_none() -> None:
+    """3b (B-5 split closure): SUPPORT_ACCEPTANCE_BREAK is now
+    structure_break's domain — ema_pullback returns None on it even
+    though htf_bias agrees and the mode is TREND_CONTINUATION."""
+    sig = detect_ema_pullback(
+        df_m5=_m5(),
+        df_h1=_h1(macd_hist=-0.10),
+        day_type=DayType.BIG_NEWS_DAY,
+        structure_state=_structure(
+            reaction="SUPPORT_ACCEPTANCE_BREAK",
+        ),
+        pair=_PAIR,
+        current_time=_NOW,
+    )
+    assert sig is None
+
+
+def test_bullish_acceptance_break_returns_none() -> None:
+    """3b mirror: RESISTANCE_ACCEPTANCE_BREAK also belongs to
+    structure_break now."""
+    sig = detect_ema_pullback(
+        df_m5=_m5(),
+        df_h1=_h1(macd_hist=0.10),
+        day_type=DayType.PRE_BIG_NEWS,
+        structure_state=_structure(
+            htf_bias="BULLISH",
+            reaction="RESISTANCE_ACCEPTANCE_BREAK",
+        ),
+        pair=_PAIR,
+        current_time=_NOW,
+    )
+    assert sig is None
+
+
 def test_non_trend_continuation_mode_returns_none() -> None:
     sig = detect_ema_pullback(
         df_m5=_m5(),
@@ -139,14 +176,15 @@ def test_htf_neutral_returns_none() -> None:
 
 
 def test_wrong_reaction_for_bias_returns_none() -> None:
-    """BEARISH HTF + RESISTANCE_ACCEPTANCE_BREAK is a mismatch."""
+    """BEARISH HTF + FAILED_RECLAIM_ABOVE_RESISTANCE is a directional
+    mismatch (a bullish-side reaction under a bearish trend)."""
     sig = detect_ema_pullback(
         df_m5=_m5(),
         df_h1=_h1(),
         day_type=DayType.BIG_NEWS_DAY,
         structure_state=_structure(
             htf_bias="BEARISH",
-            reaction="RESISTANCE_ACCEPTANCE_BREAK",
+            reaction="FAILED_RECLAIM_ABOVE_RESISTANCE",
         ),
         pair=_PAIR,
         current_time=_NOW,
