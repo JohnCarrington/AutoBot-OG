@@ -42,11 +42,17 @@ from typing import Any, Optional
 
 import pandas as pd
 
-from config.pair_config import MIN_SL_PIPS, pip_size_for, price_to_pips
 from day_type import DayType
 from common import Direction
 from structure_engine import StructureLevel, StructureState
 
+from ._structure_entry import (
+    build_sl,
+    latest_atr,
+    latest_close,
+    latest_timestamp,
+    macd_aligned_confidence,
+)
 from .constants import (
     EMA_CONT_CONF_HIGH,
     EMA_CONT_CONF_LOW,
@@ -93,16 +99,16 @@ def detect_ema_pullback(
             return None
         anchor_price = anchor_level.zone_low
 
-    atr_m5 = _latest_atr(df_m5)
+    atr_m5 = latest_atr(df_m5)
     if math.isnan(atr_m5) or atr_m5 <= 0:
         return None
 
-    entry_price = _latest_close(df_m5)
+    entry_price = latest_close(df_m5)
     if math.isnan(entry_price):
         return None
 
     profile = profile_for(_STRATEGY_NAME, day_type)
-    sl_price = _build_sl(
+    sl_price = build_sl(
         direction=direction,
         anchor_price=anchor_price,
         atr_m5=atr_m5,
@@ -110,8 +116,11 @@ def detect_ema_pullback(
         sl_atr_mult=profile.sl_atr_mult,
         sl_floor_pips_override=profile.sl_floor_pips_override,
     )
-    confidence = _confidence(direction=direction, df_h1=df_h1)
-    source_ts = _latest_timestamp(df_m5)
+    confidence = macd_aligned_confidence(
+        direction=direction, df_h1=df_h1,
+        high=EMA_CONT_CONF_HIGH, low=EMA_CONT_CONF_LOW,
+    )
+    source_ts = latest_timestamp(df_m5)
     if source_ts is None:
         return None
 
@@ -148,70 +157,6 @@ def _direction_from(state: StructureState) -> Optional[Direction]:
     if state.htf_bias == "BULLISH" and reaction == _BULLISH_REACTION:
         return Direction.BULLISH
     return None
-
-
-def _build_sl(
-    *,
-    direction: Direction,
-    anchor_price: float,
-    atr_m5: float,
-    pair: str,
-    sl_atr_mult: float,
-    sl_floor_pips_override: float | None,
-) -> float:
-    atr_pips = price_to_pips(pair, atr_m5)
-    floor_pips = (
-        sl_floor_pips_override
-        if sl_floor_pips_override is not None
-        else MIN_SL_PIPS.get(pair.upper(), 12.0)
-    )
-    sl_pips = max(floor_pips, sl_atr_mult * atr_pips)
-    sl_distance = sl_pips * pip_size_for(pair)
-    return (
-        anchor_price - sl_distance
-        if direction == Direction.BULLISH
-        else anchor_price + sl_distance
-    )
-
-
-def _confidence(*, direction: Direction, df_h1: pd.DataFrame) -> float:
-    if df_h1 is None or df_h1.empty:
-        return EMA_CONT_CONF_LOW
-    hist = _safe_float(df_h1.iloc[-1].get("macd_hist_12_26_9"))
-    if math.isnan(hist) or hist == 0.0:
-        return EMA_CONT_CONF_LOW
-    aligned = (hist > 0 and direction == Direction.BULLISH) or (
-        hist < 0 and direction == Direction.BEARISH
-    )
-    return EMA_CONT_CONF_HIGH if aligned else EMA_CONT_CONF_LOW
-
-
-def _latest_atr(df: pd.DataFrame) -> float:
-    if df is None or df.empty or "atr_14" not in df.columns:
-        return float("nan")
-    return _safe_float(df["atr_14"].iloc[-1])
-
-
-def _latest_close(df: pd.DataFrame) -> float:
-    if df is None or df.empty or "close" not in df.columns:
-        return float("nan")
-    return _safe_float(df["close"].iloc[-1])
-
-
-def _latest_timestamp(df: pd.DataFrame) -> Optional[datetime]:
-    if df is None or df.empty:
-        return None
-    ts = df.index[-1]
-    return ts if isinstance(ts, datetime) else None
-
-
-def _safe_float(value) -> float:
-    if value is None:
-        return float("nan")
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return float("nan")
 
 
 __all__ = ["detect_ema_pullback"]

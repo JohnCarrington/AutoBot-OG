@@ -102,6 +102,23 @@ def test_structure_break_pre_big_news_profile() -> None:
     )
 
 
+def test_news_big_news_day_profile() -> None:
+    """Step 5b: news matches the BIG_NEWS_DAY cell's wider 1.8 × ATR
+    stop, no fixed TP — structure trail by execution.sl_management."""
+    p = profile_for("news", DayType.BIG_NEWS_DAY)
+    assert p == ManagementProfile(
+        sl_atr_mult=1.8,
+        sl_floor_pips_override=None,
+        be_trigger_r=1.5,
+        be_buffer_pips=1.0,
+        trail_primary="swing",
+        trail_secondary="ema20",
+        trail_min_delta_pips=1.0,
+        tp_mode="none",
+        eager_structure_exit_enabled=True,
+    )
+
+
 # --- Fail-loud on unreachable cells ----------------------------------------
 
 
@@ -145,9 +162,9 @@ def test_keyerror_message_lists_reachable_cells() -> None:
 
 def _dispatcher_reachable_cells() -> set[tuple[str, DayType]]:
     """Derive the (strategy_name, day_type) set the dispatcher can
-    actually produce. Excludes the ``detect_news`` stub — it returns
-    None unconditionally (step 5 will land the real detector), so it
-    never produces a position whose management needs to be looked up.
+    actually produce. Step 5b: ``detect_news`` is now a real detector,
+    so the ``(news, BIG_NEWS_DAY)`` cell is reachable.
+
     Mapping detector → strategy_name is by module convention:
     ``strategies.<name>.detect_<name>`` emits ``strategy_name=<name>``.
     """
@@ -155,7 +172,7 @@ def _dispatcher_reachable_cells() -> set[tuple[str, DayType]]:
         dispatcher_mod.detect_bb_bounce: "bb_bounce",
         dispatcher_mod.detect_ema_pullback: "ema_pullback",
         dispatcher_mod.detect_structure_break: "structure_break",
-        # detect_news is intentionally absent — stub-only until step 5.
+        dispatcher_mod.detect_news: "news",
     }
     reachable: set[tuple[str, DayType]] = set()
     for day_type, detectors in dispatcher_mod.DISPATCH.items():
@@ -184,10 +201,14 @@ def test_management_keyset_matches_dispatcher() -> None:
     )
 
 
-def test_matrix_has_exactly_five_cells() -> None:
+def test_matrix_has_exactly_six_cells() -> None:
     """Belt-and-braces: pin the cell count so an accidental addition
-    breaks visibly even before the keyset test diagnoses what."""
-    assert len(MANAGEMENT_MATRIX) == 5
+    breaks visibly even before the keyset test diagnoses what.
+
+    Step 5b: ``(news, BIG_NEWS_DAY)`` joined the reachable set when
+    the real ``detect_news`` replaced the stub.
+    """
+    assert len(MANAGEMENT_MATRIX) == 6
 
 
 def test_eager_structure_exit_enabled_is_true_for_all_cells() -> None:

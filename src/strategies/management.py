@@ -144,6 +144,23 @@ MANAGEMENT_MATRIX: dict[tuple[StrategyName, DayType], ManagementProfile] = {
         tp_mode="none",
         eager_structure_exit_enabled=True,
     ),
+    (
+        "news",
+        DayType.BIG_NEWS_DAY,
+    ): ManagementProfile(
+        # News-driven entries take the same wider stop as the BIG_NEWS_DAY
+        # structure cells (1.8 × ATR M5). No fixed TP — structure trail
+        # by execution.sl_management owns the exit on trend-style entries.
+        sl_atr_mult=1.8,
+        sl_floor_pips_override=None,
+        be_trigger_r=1.5,
+        be_buffer_pips=1.0,
+        trail_primary="swing",
+        trail_secondary="ema20",
+        trail_min_delta_pips=1.0,
+        tp_mode="none",
+        eager_structure_exit_enabled=True,
+    ),
 }
 
 

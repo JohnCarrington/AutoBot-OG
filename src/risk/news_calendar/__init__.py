@@ -28,6 +28,7 @@ from .calendar import (
     events_in_window,
     get_actual_for_event,
     is_blackout,
+    parse_event_time,
     poll_for_actual,
 )
 from .impact import (
@@ -47,6 +48,7 @@ __all__ = [
     "poll_for_actual",
     "is_blackout",
     "events_in_window",
+    "parse_event_time",
     "BlackoutResult",
     "Impact",
     "parse_impact",

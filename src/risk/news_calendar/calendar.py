@@ -200,7 +200,7 @@ def get_actual_for_event(
         "previous": best.get("prev"),
         # Raw Finnhub time string for diagnostics / logging (review M2).
         # The parsed-datetime form is internal to ``is_blackout``; callers
-        # that need a datetime can re-parse this via ``_parse_event_time``.
+        # that need a datetime can re-parse this via ``parse_event_time``.
         "event_time": best.get("time"),
     }
 
@@ -290,7 +290,7 @@ class BlackoutResult:
     confidence: str
 
 
-def _parse_event_time(time_str: Any) -> Optional[datetime]:
+def parse_event_time(time_str: Any) -> Optional[datetime]:
     """Parse an event time string or numeric into a UTC-aware ``datetime``.
 
     Handles multiple incoming representations because Finnhub's response
@@ -427,7 +427,7 @@ def is_blackout(
         impact = parse_impact(ev.get("impact"))
         if impact is Impact.LOW:
             continue
-        ev_time = _parse_event_time(ev.get("time", ""))
+        ev_time = parse_event_time(ev.get("time", ""))
         if ev_time is None:
             continue
         if not (window_start <= ev_time <= window_end):
@@ -514,7 +514,7 @@ def events_in_window(
             continue
         if _IMPACT_RANK[parse_impact(ev.get("impact"))] < impact_floor:
             continue
-        ev_time = _parse_event_time(ev.get("time", ""))
+        ev_time = parse_event_time(ev.get("time", ""))
         if ev_time is None:
             continue
         if start_utc <= ev_time <= end_utc:
@@ -565,4 +565,5 @@ __all__ = [
     "get_actual_for_event",
     "is_blackout",
     "events_in_window",
+    "parse_event_time",
 ]

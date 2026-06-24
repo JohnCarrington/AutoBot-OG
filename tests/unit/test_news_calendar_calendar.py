@@ -11,7 +11,7 @@ Covers seven review items:
       to the computed deviation.
 - H7: ``is_blackout`` public surface — HIGH/MEDIUM in-window vs out-of-window,
       unknown currency, no events.
-- N1: ``_parse_event_time`` accepts space-separated, ISO-8601 (T-separator,
+- N1: ``parse_event_time`` accepts space-separated, ISO-8601 (T-separator,
       ``Z`` suffix, ±offset), Unix int/float/string; logs WARNING on
       unparseable input.
 - M2: ``get_actual_for_event`` result dict carries the original Finnhub
@@ -38,7 +38,7 @@ from risk.news_calendar import calendar as cal_mod
 from risk.news_calendar.calendar import (
     _force_cache_age_for_tests,
     _inject_events_for_tests,
-    _parse_event_time,
+    parse_event_time,
     _reset_cache_for_tests,
 )
 
@@ -405,25 +405,25 @@ def test_h7_malformed_event_time_is_skipped() -> None:
 
 def test_n1_parser_legacy_space_separated() -> None:
     """The legacy Finnhub format must continue to parse."""
-    dt = _parse_event_time("2026-05-14 12:00:00")
+    dt = parse_event_time("2026-05-14 12:00:00")
     assert dt == datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_n1_parser_iso_t_separator_no_offset() -> None:
     """ISO 8601 with T separator and no offset is assumed UTC."""
-    dt = _parse_event_time("2026-05-14T12:00:00")
+    dt = parse_event_time("2026-05-14T12:00:00")
     assert dt == datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_n1_parser_iso_z_suffix() -> None:
     """ISO 8601 with explicit Z suffix."""
-    dt = _parse_event_time("2026-05-14T12:00:00Z")
+    dt = parse_event_time("2026-05-14T12:00:00Z")
     assert dt == datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_n1_parser_iso_positive_offset_converted_to_utc() -> None:
     """``+01:00`` offset: ``13:00+01:00`` is the same moment as ``12:00 UTC``."""
-    dt = _parse_event_time("2026-05-14T13:00:00+01:00")
+    dt = parse_event_time("2026-05-14T13:00:00+01:00")
     assert dt is not None
     # Same instant as 12:00 UTC.
     assert dt.astimezone(timezone.utc) == datetime(
@@ -433,7 +433,7 @@ def test_n1_parser_iso_positive_offset_converted_to_utc() -> None:
 
 def test_n1_parser_iso_negative_offset() -> None:
     """``-05:00`` offset: ``07:00-05:00`` is the same moment as ``12:00 UTC``."""
-    dt = _parse_event_time("2026-05-14T07:00:00-05:00")
+    dt = parse_event_time("2026-05-14T07:00:00-05:00")
     assert dt is not None
     assert dt.astimezone(timezone.utc) == datetime(
         2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc
@@ -443,27 +443,27 @@ def test_n1_parser_iso_negative_offset() -> None:
 def test_n1_parser_unix_int() -> None:
     """Unix-seconds as an int."""
     # 1715688000 == 2024-05-14 12:00:00 UTC
-    dt = _parse_event_time(1715688000)
+    dt = parse_event_time(1715688000)
     assert dt == datetime(2024, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_n1_parser_unix_float() -> None:
     """Unix-seconds as a float keeps sub-second precision."""
-    dt = _parse_event_time(1715688000.5)
+    dt = parse_event_time(1715688000.5)
     assert dt is not None
     assert dt == datetime(2024, 5, 14, 12, 0, 0, 500000, tzinfo=timezone.utc)
 
 
 def test_n1_parser_unix_string() -> None:
     """A numeric string is treated as Unix seconds."""
-    dt = _parse_event_time("1715688000")
+    dt = parse_event_time("1715688000")
     assert dt == datetime(2024, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
 
 
 def test_n1_parser_empty_and_none() -> None:
-    assert _parse_event_time("") is None
-    assert _parse_event_time("   ") is None
-    assert _parse_event_time(None) is None
+    assert parse_event_time("") is None
+    assert parse_event_time("   ") is None
+    assert parse_event_time(None) is None
 
 
 def test_n1_parser_unparseable_logs_warning(
@@ -475,7 +475,7 @@ def test_n1_parser_unparseable_logs_warning(
 
     bad = "definitely-not-a-timestamp"
     with caplog.at_level(logging.WARNING, logger="risk.news_calendar.calendar"):
-        result = _parse_event_time(bad)
+        result = parse_event_time(bad)
     assert result is None
     # The garbage string must appear in at least one captured record.
     assert any(bad in rec.getMessage() for rec in caplog.records), (
@@ -486,8 +486,8 @@ def test_n1_parser_unparseable_logs_warning(
 def test_n1_parser_bool_treated_as_unparseable() -> None:
     """``bool`` is a subclass of ``int`` in Python; we must not silently
     convert ``True``/``False`` to Unix seconds 0/1."""
-    assert _parse_event_time(True) is None
-    assert _parse_event_time(False) is None
+    assert parse_event_time(True) is None
+    assert parse_event_time(False) is None
 
 
 def test_n1_is_blackout_accepts_iso_time_strings() -> None:

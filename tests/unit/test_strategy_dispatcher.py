@@ -158,9 +158,12 @@ def test_pre_big_news_routes_to_structure_break_and_ema_pullback(
     assert bb.calls == []  # type: ignore[attr-defined]
 
 
-def test_big_news_routes_to_news_structure_break_and_ema_pullback(
+def test_big_news_inside_window_runs_news_only(
     monkeypatch, empty_frames
 ) -> None:
+    """Step 5b: on BIG_NEWS_DAY inside a HIGH-impact release window,
+    only ``detect_news`` runs; structure_break / ema_pullback are
+    muted."""
     news = _stub("news")
     sb = _stub("structure_break")
     ema = _stub("ema_pullback")
@@ -172,6 +175,7 @@ def test_big_news_routes_to_news_structure_break_and_ema_pullback(
         detect_ema_pullback=ema,
         detect_bb_bounce=bb,
     )
+    monkeypatch.setattr(dispatcher, "is_in_release_window", lambda *a, **k: True)
     out = dispatcher.detect_all_setups(
         df_m5=empty_frames[0],
         df_h1=empty_frames[1],
@@ -181,9 +185,90 @@ def test_big_news_routes_to_news_structure_break_and_ema_pullback(
         current_time=_NOW,
     )
     names = sorted(sig.strategy_name for sig in out)
-    assert names == ["ema_pullback", "news", "structure_break"]
+    assert names == ["news"]
     assert all(sig.day_type == DayType.BIG_NEWS_DAY for sig in out)
+    assert sb.calls == []  # type: ignore[attr-defined]
+    assert ema.calls == []  # type: ignore[attr-defined]
     assert bb.calls == []  # type: ignore[attr-defined]
+
+
+def test_big_news_outside_window_runs_structure_only(
+    monkeypatch, empty_frames
+) -> None:
+    """Step 5b: on BIG_NEWS_DAY outside any release window, only the
+    structure detectors run; ``detect_news`` is skipped (no fresh
+    release to read)."""
+    news = _stub("news")
+    sb = _stub("structure_break")
+    ema = _stub("ema_pullback")
+    bb = _stub("bb_bounce")
+    _patch_table(
+        monkeypatch,
+        detect_news=news,
+        detect_structure_break=sb,
+        detect_ema_pullback=ema,
+        detect_bb_bounce=bb,
+    )
+    monkeypatch.setattr(dispatcher, "is_in_release_window", lambda *a, **k: False)
+    out = dispatcher.detect_all_setups(
+        df_m5=empty_frames[0],
+        df_h1=empty_frames[1],
+        day_type=DayType.BIG_NEWS_DAY,
+        structure_state=_stub_structure_state(),
+        pair="GBPUSD",
+        current_time=_NOW,
+    )
+    names = sorted(sig.strategy_name for sig in out)
+    assert names == ["ema_pullback", "structure_break"]
+    assert all(sig.day_type == DayType.BIG_NEWS_DAY for sig in out)
+    assert news.calls == []  # type: ignore[attr-defined]
+    assert bb.calls == []  # type: ignore[attr-defined]
+
+
+def test_pre_big_news_never_window_suppressed(
+    monkeypatch, empty_frames
+) -> None:
+    """Step 5b: PRE_BIG_NEWS is NEVER window-suppressed — both
+    structure detectors run regardless of where the clock sits."""
+    sb = _stub("structure_break")
+    ema = _stub("ema_pullback")
+    news = _stub("news")
+    _patch_table(
+        monkeypatch,
+        detect_structure_break=sb,
+        detect_ema_pullback=ema,
+        detect_news=news,
+    )
+    # Even with the window predicate forced True, PRE_BIG_NEWS branch
+    # must not consult it.
+    monkeypatch.setattr(dispatcher, "is_in_release_window", lambda *a, **k: True)
+    out = dispatcher.detect_all_setups(
+        df_m5=empty_frames[0],
+        df_h1=empty_frames[1],
+        day_type=DayType.PRE_BIG_NEWS,
+        structure_state=_stub_structure_state(),
+        pair="GBPUSD",
+        current_time=_NOW,
+    )
+    names = sorted(sig.strategy_name for sig in out)
+    assert names == ["ema_pullback", "structure_break"]
+    assert news.calls == []  # type: ignore[attr-defined]
+
+
+def test_normal_never_window_suppressed(monkeypatch, empty_frames) -> None:
+    """Step 5b: NORMAL is NEVER window-suppressed."""
+    bb = _stub("bb_bounce")
+    _patch_table(monkeypatch, detect_bb_bounce=bb)
+    monkeypatch.setattr(dispatcher, "is_in_release_window", lambda *a, **k: True)
+    out = dispatcher.detect_all_setups(
+        df_m5=empty_frames[0],
+        df_h1=empty_frames[1],
+        day_type=DayType.NORMAL,
+        structure_state=_stub_structure_state(),
+        pair="GBPUSD",
+        current_time=_NOW,
+    )
+    assert [sig.strategy_name for sig in out] == ["bb_bounce"]
 
 
 # --- Stub detectors return None --------------------------------------------
@@ -193,10 +278,13 @@ def test_unpatched_dispatch_with_neutral_structure_yields_empty(
     empty_frames,
 ) -> None:
     """With the real DISPATCH table and a neutral / UNKNOWN structure
-    state, no detector's gates pass — detect_news is still a stub
-    (step 5), structure_break + ema_pullback both gate on
-    TREND_CONTINUATION + a directional htf_bias, neither of which the
-    stub state provides — so the result is the empty list.
+    state, no detector's gates pass.
+
+    Step 5b: on BIG_NEWS_DAY in a fresh test process the news_calendar
+    cache is empty, so ``is_in_release_window`` returns False and the
+    active set is the two structure detectors. Both gate on
+    ``TREND_CONTINUATION`` + a directional ``htf_bias``, neither of
+    which the stub state provides — so the result is the empty list.
     """
     out = dispatcher.detect_all_setups(
         df_m5=empty_frames[0],
@@ -218,20 +306,23 @@ def test_real_dispatch_table_maps_to_real_detectors() -> None:
 
     Catches a fat-fingered table edit — every other dispatcher test
     rebuilds the table via ``_patch_table`` and so cannot notice the
-    actual module-level tuple regressing. After step 2d / step 3:
+    actual module-level tuple regressing. After step 5b:
 
     - NORMAL → (detect_bb_bounce,)
     - PRE_BIG_NEWS → (detect_structure_break, detect_ema_pullback)
     - BIG_NEWS_DAY → (detect_news, detect_structure_break,
-                       detect_ema_pullback)
+                       detect_ema_pullback)  — the *potential* set;
+                       the active subset on BIG_NEWS_DAY depends on
+                       the release-window predicate (see
+                       ``test_big_news_inside_window_runs_news_only`` /
+                       ``test_big_news_outside_window_runs_structure_only``).
 
-    ``detect_news`` is currently the local stub inside dispatcher.py;
-    ``detect_structure_break`` is the real strategies.structure_break
-    detector (step 3); ``detect_bb_bounce`` / ``detect_ema_pullback``
-    are the real strategy modules.
+    All four are real strategy modules — ``detect_news`` (step 5b)
+    replaced the previous return-None stub.
     """
     from strategies.bb_bounce import detect_bb_bounce as real_bb
     from strategies.ema_pullback import detect_ema_pullback as real_ema
+    from strategies.news import detect_news as real_news
     from strategies.structure_break import (
         detect_structure_break as real_sb,
     )
@@ -242,16 +333,11 @@ def test_real_dispatch_table_maps_to_real_detectors() -> None:
         real_ema,
     )
     assert dispatcher.DISPATCH[DayType.BIG_NEWS_DAY] == (
-        dispatcher.detect_news,
+        real_news,
         real_sb,
         real_ema,
     )
-    # detect_news is still the local-stub object inside dispatcher.py
-    # (step 5 lands the real one). Confirm by checking it doesn't come
-    # from a strategies.news module.
-    assert dispatcher.detect_news.__module__ == "strategies.dispatcher"
-    # detect_structure_break IS the real strategies.structure_break
-    # function (step 3 wired it in).
+    assert dispatcher.detect_news.__module__ == "strategies.news"
     assert real_sb.__module__ == "strategies.structure_break"
 
 
